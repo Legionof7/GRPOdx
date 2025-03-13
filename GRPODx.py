@@ -156,6 +156,36 @@ Keep your responses relatively brief (1-3 sentences).
         # Track which symptoms have been discussed
         self.asked_symptoms = set()
 
+    def _clean_doctor_message(self, message: str) -> str:
+        """Remove XML tags and internal reasoning from doctor's message.
+        
+        This ensures the patient only sees and responds to the actual questions
+        directed at them, not the doctor's internal reasoning.
+        
+        Args:
+            message: Raw message from the doctor
+            
+        Returns:
+            Cleaned message without XML sections
+        """
+        # Remove <reasoning>...</reasoning> sections
+        message = re.sub(r'<reasoning>.*?</reasoning>', '', message, flags=re.DOTALL)
+        
+        # Remove <answer>...</answer> sections
+        message = re.sub(r'<answer>.*?</answer>', '', message, flags=re.DOTALL)
+        
+        # Clean up any "Final diagnosis:" sections
+        message = re.sub(r'Final diagnosis:.*?(\n|$)', '', message, flags=re.DOTALL)
+        
+        # Remove any trailing whitespace or redundant newlines
+        message = re.sub(r'\n{3,}', '\n\n', message.strip())
+        
+        if not message:
+            # If nothing is left after cleaning, return a generic message
+            return "Could you tell me about your symptoms?"
+            
+        return message
+    
     def answer_question(self, question: str) -> str:
         """Answer a question from the doctor based on symptoms.
 
@@ -165,8 +195,11 @@ Keep your responses relatively brief (1-3 sentences).
         Returns:
             Patient's response based on symptoms
         """
-        # Add the doctor's question to chat history
-        self.chat_history.append({"role": "user", "content": question})
+        # Clean the doctor's message to remove reasoning/answer sections
+        clean_question = self._clean_doctor_message(question)
+        
+        # Add the cleaned doctor's question to chat history
+        self.chat_history.append({"role": "user", "content": clean_question})
 
         if self.use_llm:
             try:
@@ -632,16 +665,22 @@ def run_simulated_chat(model, tokenizer, lora_adapter):
         tokenizer: Tokenizer for the model
         lora_adapter: LoRA adapter for the model
     """
-    print("\n========= SIMULATED DIAGNOSIS CHAT =========\n")
+    print("\n" + "="*60)
+    print("         SIMULATED DIAGNOSIS CHAT")
+    print("="*60 + "\n")
     print("You will observe a conversation between the AI doctor and a simulated patient.")
-    print("The patient will have a randomly generated disease.\n")
+    print("The patient will have a randomly generated disease.")
+    print("You will see both the doctor's full response (including internal reasoning)")
+    print("and what the patient actually sees after filtering out the reasoning.\n")
     
     # Generate a random disease
     disease = generate_disease()
-    print(f"Patient has: {disease['disease_name']}")
+    print("-"*60)
+    print(f"GROUND TRUTH DISEASE: {disease['disease_name']}")
     print(f"Description: {disease.get('description', 'No description available')}")
     print(f"Symptoms present: {', '.join([s for s, v in disease['symptoms'].items() if v])}")
     print(f"Symptoms absent: {', '.join([s for s, v in disease['symptoms'].items() if not v])}")
+    print("-"*60)
     print("\n--- Beginning of conversation ---\n")
     
     # Create patient agent
@@ -669,12 +708,14 @@ Your final diagnosis here
     
     # Initial prompt from patient
     patient_initial = "Doctor, I'm not feeling well today."
-    print(f"Patient: {patient_initial}")
+    print(f"Patient's Initial Message:")
+    print(f"{patient_initial}")
     conversation.append({"role": "user", "content": patient_initial})
     
     # Main conversation loop
     max_turns = 10
     for turn in range(max_turns):
+        print(f"\n{'='*30} TURN {turn+1} {'='*30}")
         # Get doctor's response
         prompt = tokenizer.apply_chat_template(conversation, tokenize=False, add_generation_prompt=True)
         
@@ -693,8 +734,14 @@ Your final diagnosis here
         # Add doctor's response to conversation
         conversation.append({"role": "assistant", "content": response})
         
-        # Display doctor's response
-        print(f"Doctor: {response}")
+        # Display doctor's full response (with reasoning) for the user
+        print(f"Doctor's Full Response (including internal reasoning):")
+        print(f"{response}")
+        
+        # Show what the patient actually sees (cleaned message)
+        clean_response = patient._clean_doctor_message(response)
+        print(f"\nWhat the patient actually sees:")
+        print(f"{clean_response}")
         
         # Check if final diagnosis was given
         if "final diagnosis:" in response.lower():
@@ -723,7 +770,8 @@ Your final diagnosis here
         
         # Get patient's response
         patient_response = patient.answer_question(response)
-        print(f"Patient: {patient_response}")
+        print(f"\nPatient's Response:")
+        print(f"{patient_response}")
         conversation.append({"role": "user", "content": patient_response})
         
         # Ask user if they want to continue or exit
