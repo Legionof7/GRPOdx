@@ -451,215 +451,121 @@ Your final diagnosis here
 
 
 def calculate_reward(diagnosis: str, disease_info: Dict) -> float:
-    """Calculate reward based on diagnostic accuracy.
+    """Calculate reward based on diagnostic accuracy using GPT-4o-mini.
 
     Args:
         diagnosis: The doctor's final diagnosis
         disease_info: The actual disease definition
 
     Returns:
-        Reward value (1.0 for correct, partial for close match, 0 for incorrect)
+        Reward value between 0.0 and 1.0
     """
-    # Get the correct disease name
-    correct_disease = disease_info["disease_name"].lower()
-    diagnosis = diagnosis.lower()
-
-    # Exact match gets full reward
-    if correct_disease in diagnosis:
-        return 1.0
-
-    # Check for partial matches or synonyms
-    # This could be expanded with a medical knowledge base of related terms
-    disease_terms = correct_disease.split()
-    matched_terms = sum(1 for term in disease_terms if term in diagnosis)
-
-    if matched_terms > 0:
-        return 0.5 * (matched_terms / len(disease_terms))
-
-    # No match
-    return 0.0
+    # Create simple response with the diagnosis
+    response = f"Final diagnosis: {diagnosis}"
+    
+    # Use the main evaluation function
+    return evaluate_diagnosis(response, disease_info)
 
 
 # ======================================================================
 # Reward Functions for GRPO
 # ======================================================================
 
-
-def calculate_numerical_reward(
-    diagnosis: str, disease_info: Dict, reasoning: str = ""
-) -> float:
-    """Calculate a numerical reward score (0 to 1) using GPT-4o-mini.
-
-    Args:
-        diagnosis: The doctor's final diagnosis
-        disease_info: The actual disease definition
-        reasoning: The reasoning behind the diagnosis
-
-    Returns:
-        Numerical reward value between 0 and 1
+def evaluate_diagnosis(response: str, disease_info: Dict, verbose: bool = False) -> float:
     """
-    # Get the ground truth disease and symptoms
-    correct_disease = disease_info["disease_name"]
+    Simple diagnosis evaluation using GPT-4o-mini.
+    
+    Args:
+        response: The doctor's full response
+        disease_info: Dictionary containing disease information
+        verbose: Whether to print evaluation details
+    
+    Returns:
+        Evaluation score between 0.0 and 1.0
+    """
+    # Add debugging to see what we're evaluating
+    if verbose:
+        print("\n============ RESPONSE TO EVALUATE ============")
+        print(f"Evaluating response for disease: {disease_info['disease_name']}")
+        print(f"Response length: {len(response)} characters")
+        print(f"Response preview: {response[:100]}...")
+    
+    # Force response to string if needed
+    if not isinstance(response, str):
+        print(f"WARNING: response is not a string but {type(response)}")
+        if hasattr(response, 'content'):
+            response = response.content
+        else:
+            response = str(response)
+    
+    # Get symptoms present and absent
+    symptoms_present = [s for s, v in disease_info['symptoms'].items() if v]
+    symptoms_absent = [s for s, v in disease_info['symptoms'].items() if not v]
+    
+    # Special case for initial patient messages or empty responses
+    if len(response.strip()) < 20 or "I'm not feeling well today" in response:
+        if verbose:
+            print("Very short or initial patient message detected - score is 0.0")
+        return 0.0
+    
+    # Construct prompt for GPT-4o-mini
+    system_message = """You are a medical evaluation system. Your task is to evaluate a doctor's diagnosis 
+given a set of symptoms and the correct diagnosis. Grade the doctor's response on a scale from 0.0 to 1.0.
 
-    symptoms_present = [s for s, v in disease_info["symptoms"].items() if v]
-    symptoms_absent = [s for s, v in disease_info["symptoms"].items() if not v]
+Respond ONLY with a single decimal number between 0.0 and 1.0. Do not include any explanation."""
 
-    # First, try using GPT-4o-mini to calculate the reward score
-    try:
-        # Construct the system message
-        system_message = """You are a medical evaluation system. Your task is to evaluate a doctor's diagnosis 
-given a set of symptoms and the correct diagnosis. Provide a score from 0.0 to 1.0, where:
-- 1.0: Perfect diagnosis that matches the correct disease exactly
-- 0.75-0.99: Very good diagnosis that identifies the correct disease with minor inaccuracies
-- 0.5-0.74: Partial match - identifies some aspects of the disease or a related condition
-- 0.25-0.49: Poor match but shows some understanding of symptoms
-- 0.0-0.24: Completely incorrect diagnosis or failed to provide diagnosis
-
-ONLY respond with a single number between 0.0 and 1.0 with one decimal place. Do not include any explanation."""
-
-        # Create the user prompt
-        user_prompt = f"""
-Correct Diagnosis: {correct_disease}
+    user_message = f"""Correct Diagnosis: {disease_info['disease_name']}
 Symptoms Present: {', '.join(symptoms_present)}
 Symptoms Absent: {', '.join(symptoms_absent)}
 
-Doctor's Diagnosis: {diagnosis}
-Doctor's Reasoning: {reasoning}
+Doctor's Response:
+{response}
 
-Evaluate and provide a score from 0.0 to 1.0:"""
-
-        # Get the evaluation from GPT-4o-mini
-        response = openai.chat.completions.create(
+Grade the doctor's response from 0.0 to 1.0:"""
+    
+    if verbose:
+        print("Calling GPT-4o-mini for evaluation...")
+        
+    try:
+        # Call GPT-4o-mini for evaluation
+        api_response = openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_message},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": user_message}
             ],
             temperature=0.1,
             max_tokens=10,
         )
-
+        
         # Extract the score from the response
-        score_text = response.choices[0].message.content.strip()
-
-        # Try to convert the score to a float
+        score_text = api_response.choices[0].message.content.strip()
+        if verbose:
+            print(f"GPT-4o-mini response: {score_text}")
+        
+        # Try to convert to float
         try:
             score = float(score_text)
-            # Ensure the score is between 0 and 1
+            # Ensure the score is within bounds
             score = max(0.0, min(1.0, score))
+            if verbose:
+                print(f"Parsed score: {score:.2f}")
             return score
         except ValueError:
-            # If we can't convert to float, fall back to heuristic scoring
-            print(
-                f"Could not convert score '{score_text}' to float. Using fallback scoring."
-            )
+            if verbose:
+                print(f"Could not parse GPT response as float: {score_text}")
+            return 0.0  # Default to zero for unparseable responses
+    
     except Exception as e:
-        print(f"GPT-4o-mini evaluation failed: {e}")
-
-    # Fallback heuristic scoring if GPT-4o-mini fails
-    diagnosis = diagnosis.lower()
-    correct_disease = correct_disease.lower()
-
-    # Exact match gets full reward
-    if correct_disease in diagnosis:
-        # Scale based on exactness of match
-        if diagnosis.strip() == correct_disease.strip():
-            return 1.0
-        else:
-            return 0.9  # Good but not exact
-
-    # Check for partial matches
-    disease_terms = correct_disease.split()
-    matched_terms = sum(1 for term in disease_terms if term in diagnosis)
-
-    if matched_terms > 0:
-        # Scale based on how many terms match
-        return 0.5 * (matched_terms / len(disease_terms))
-
-    # Check if reasoning shows understanding of key symptoms
-    if reasoning:
-        reasoning = reasoning.lower()
-        symptom_mentioned = sum(
-            1 for symptom in symptoms_present if symptom in reasoning
-        )
-        if symptom_mentioned > len(symptoms_present) / 2:
-            return 0.3  # Shows some understanding of symptoms
-
-    # No match
-    return 0.0
-
-
-# Import the proper verdict evaluation
-try:
-    # Attempt to import from verdict_eval
-    from verdict_eval import evaluate_diagnosis
-    print("Successfully imported evaluate_diagnosis from verdict_eval")
-except ImportError:
-    # Define a fallback function in case verdict_eval import fails
-    def evaluate_diagnosis(response, disease_info, verbose=False):
-        """Fallback diagnosis evaluation function if verdict_eval fails.
-        
-        Args:
-            response: Text response from the doctor model
-            disease_info: Disease information dictionary
-            verbose: Whether to print detailed information
-            
-        Returns:
-            Reward score between 0.0 and 1.0
-        """
-        print("WARNING: Using fallback evaluation function")
-        # Extract diagnosis and calculate basic reward
-        import re
-        diagnosis = None
-        
-        # Extract diagnosis
-        diagnosis_match = re.search(r"final diagnosis:\s*([^.\n]+)", response.lower())
-        if diagnosis_match:
-            diagnosis = diagnosis_match.group(1).strip()
-        else:
-            # Try to extract from the <answer> tag
-            answer_match = re.search(r"<answer>\s*([^<]+)", response)
-            if answer_match:
-                diagnosis = answer_match.group(1).strip()
-        
-        # Extract reasoning but don't use it directly in scoring
-        has_reasoning = False
-        reasoning_match = re.search(r"<reasoning>(.*?)</reasoning>", response, re.DOTALL)
-        if reasoning_match:
-            has_reasoning = True
-        
-        # Calculate basic reward
-        reward = 0.1  # Base reward
-        
-        # Format checking
-        if "<reasoning>" in response and "</reasoning>" in response:
-            reward += 0.2
-        if "<answer>" in response and "</answer>" in response:
-            reward += 0.1
-        if "final diagnosis:" in response.lower():
-            reward += 0.1
-        
-        # Diagnosis checking (simplified)
-        if diagnosis:
-            if disease_info["disease_name"].lower() in diagnosis.lower():
-                reward += 0.6
-            else:
-                # Check for partial matches
-                for term in disease_info["disease_name"].lower().split():
-                    if term in diagnosis.lower() and len(term) > 3:  # Avoid matching short words
-                        reward += 0.2
-                        break
-        
         if verbose:
-            print(f"Diagnosis: {diagnosis or 'None'}")
-            print(f"Has reasoning: {has_reasoning}")
-            print(f"Reward: {reward:.2f}")
-        
-        return min(1.0, reward)
-
+            print(f"GPT-4o-mini evaluation failed: {e}")
+        return 0.0  # Default to zero on API failure
+    
+    if verbose:
+        print("============ END EVALUATION ============\n")
 
 def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[float]:
-    """GRPO reward function that uses GPT-4o-mini for evaluation.
+    """Simple GRPO reward function that uses GPT-4o-mini for evaluation.
 
     Args:
         prompts: Input prompts
@@ -669,26 +575,9 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
     Returns:
         List of reward values between 0 and 1
     """
-    # Import the GPT-4o-mini based evaluator
-    from verdict_eval import evaluate_diagnosis
     print("Using GPT-4o-mini for evaluation")
     
-    # Add debugging for completions inspection
-    print(f"\n========== COMPLETIONS DEBUG ==========")
-    print(f"Number of completions: {len(completions)}")
-    print(f"Disease: {disease_info[0]['disease_name']}")
-    for i, completion in enumerate(completions):
-        print(f"Completion {i+1} type: {type(completion)}")
-        print(f"Completion {i+1} structure: {completion}")
-        if isinstance(completion, list) and len(completion) > 0:
-            print(f"First item type: {type(completion[0])}")
-            if isinstance(completion[0], dict) and 'content' in completion[0]:
-                content_sample = completion[0]['content'][:50] + "..." if len(completion[0]['content']) > 50 else completion[0]['content']
-                print(f"Content preview: {content_sample}")
-    print(f"========== END COMPLETIONS DEBUG ==========\n")
-    
     rewards = []
-    print("Calculating rewards...")
     
     for i, completion in enumerate(completions):
         # Check what we're getting and extract content safely
@@ -699,7 +588,7 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
             content = str(completion)  # Try to convert to string
         
         # Use GPT-4o-mini evaluation function with debugging information
-        print(f"\n----- Evaluating Completion {i+1}/{len(completions)} -----")
+        print(f"Evaluating completion {i+1}/{len(completions)}")
         score = evaluate_diagnosis(
             response=content,
             disease_info=disease_info[0],
@@ -708,51 +597,7 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
         
         # Add the score
         rewards.append(score)
-        print(f"Reward {i+1}/{len(completions)}: {score:.2f} (GPT-4o-mini evaluation)")
-    
-    return rewards
-
-
-def format_reward_function(completions, **kwargs) -> List[float]:
-    """Format reward function focusing only on structure/format.
-    This works alongside the Verdict evaluation to ensure properly structured output.
-
-    Args:
-        completions: Model completions
-
-    Returns:
-        List of format rewards
-    """
-    rewards = []
-    print("Calculating format-specific rewards...")
-
-    for i, completion in enumerate(completions):
-        content = completion[0]["content"]
-        reward = 0.0
-        
-        # Check for XML tags and proper formatting
-        if "<reasoning>" in content and "</reasoning>" in content:
-            reward += 0.3
-            print(f"Format {i+1}/{len(completions)}: Found proper reasoning tags (+0.3)")
-        elif "<reasoning>" in content:  # Partial tag
-            reward += 0.1
-            print(f"Format {i+1}/{len(completions)}: Found partial reasoning tags (+0.1)")
-            
-        if "<answer>" in content and "</answer>" in content:
-            reward += 0.2
-            print(f"Format {i+1}/{len(completions)}: Found proper answer tags (+0.2)")
-        
-        if "final diagnosis:" in content.lower():
-            reward += 0.1
-            print(f"Format {i+1}/{len(completions)}: Found proper diagnosis format (+0.1)")
-            
-        # Give minimal reward for any non-empty response to prevent zero rewards
-        if len(content.strip()) > 0 and reward == 0:
-            reward = 0.05
-            print(f"Format {i+1}/{len(completions)}: Minimal non-empty response (+0.05)")
-            
-        rewards.append(reward)
-        print(f"Format reward {i+1}/{len(completions)}: {reward:.2f}")
+        print(f"Reward {i+1}/{len(completions)}: {score:.2f}")
     
     return rewards
 
@@ -1086,6 +931,7 @@ class OnlineGRPOTrainer:
             max_grad_norm=0.1,
             report_to="none",
             output_dir=self.output_dir,
+            # Using relative rewards as the default GRPO approach
         )
         
         # Track progress
@@ -1155,8 +1001,7 @@ Your final diagnosis here
                 model=self.model,
                 processing_class=self.tokenizer,
                 reward_funcs=[
-                    grpo_reward_function,  # Primary diagnostic correctness reward
-                    format_reward_function,  # Format adherence reward
+                    grpo_reward_function,  # Simple GPT-4o-mini evaluation
                 ],
                 args=self.training_args,
                 train_dataset=train_dataset,
@@ -1383,6 +1228,7 @@ def main():
                 max_grad_norm=0.1,
                 report_to="none",
                 output_dir=OUTPUT_DIR,
+                # Using relative rewards as the default GRPO approach
             )
 
             # Create GRPO trainer
@@ -1391,8 +1237,7 @@ def main():
                 model=model,
                 processing_class=tokenizer,
                 reward_funcs=[
-                    grpo_reward_function,  # Primary diagnostic correctness reward
-                    format_reward_function,  # Format adherence reward
+                    grpo_reward_function,  # Use simplified reward function
                 ],
                 args=training_args,
                 train_dataset=dataset,
