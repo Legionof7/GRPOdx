@@ -96,7 +96,7 @@ def format_conversation(conversation_history, turn_number=None):
     
     # Add turn number to system prompt if provided
     if turn_number is not None:
-        system_content += f"\n\nCURRENT TURN: {turn_number}/10"
+        system_content += f"\n\nCURRENT TURN: {turn_number}/20"
     
     formatted_messages = [
         {"role": "system", "content": system_content}
@@ -245,6 +245,37 @@ def extract_question(text):
     
     return None
 
+def extract_diagnosis_tag(text):
+    """Extract the diagnosis from <diagnosis> tags, with safety checks"""
+    # Safety check for None or non-string values
+    if text is None:
+        return None
+    
+    # Ensure text is a string
+    if not isinstance(text, str):
+        try:
+            text = str(text)
+        except:
+            return None
+    
+    # Search for diagnosis in new tag format
+    try:
+        diagnosis_tag_pattern = r"<diagnosis>(.*?)</diagnosis>"
+        match = re.search(diagnosis_tag_pattern, text, re.DOTALL)
+        if match:
+            diagnosis_content = match.group(1).strip()
+            # Now extract the "Final diagnosis: X" from within the tags
+            final_pattern = r"Final diagnosis: ([A-Za-z\s\-\.,']+)"
+            final_match = re.search(final_pattern, diagnosis_content)
+            if final_match:
+                return final_match.group(1).strip()
+            # If no "Final diagnosis:" format found, return the whole content
+            return diagnosis_content.strip()
+    except Exception as e:
+        print(f"Warning: Error extracting diagnosis from tags: {e}")
+    
+    return None
+
 def extract_diagnosis(text):
     """Extract the diagnosis from text, with safety checks"""
     # Safety check for None or non-string values
@@ -258,7 +289,12 @@ def extract_diagnosis(text):
         except:
             return None
     
-    # Search for diagnosis pattern - primary format we want
+    # First, try to extract from the new <diagnosis> tags
+    diagnosis_from_tag = extract_diagnosis_tag(text)
+    if diagnosis_from_tag:
+        return diagnosis_from_tag
+    
+    # If not found in tags, search for diagnosis pattern - primary format we want
     try:
         diagnosis_pattern = r"Final diagnosis: ([A-Za-z\s\-\.,']+)"
         match = re.search(diagnosis_pattern, text)
@@ -315,7 +351,7 @@ def extract_diagnosis(text):
 from llm_patient import llm_patient_response, create_llm_patient
 
 # Episode simulation
-def run_episode(model, tokenizer, disease_info=None, max_turns=10, use_llm_patient=False):
+def run_episode(model, tokenizer, disease_info=None, max_turns=20, use_llm_patient=False):
     """
     Run a complete diagnostic episode
     
@@ -369,21 +405,27 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=10, use_llm_patie
             sampling_params=sampling_params,
         )[0].outputs[0].text
         
-        # Extract parts
-        question_text = extract_question(response)
+        # Check for diagnosis first - it takes precedence
+        diagnosis = extract_diagnosis_tag(response)
         
-        if not question_text:
-            # If no valid question format, skip this turn
-            continue
-        
-        # Check if this is a final diagnosis
-        diagnosis = extract_diagnosis(question_text)
+        # If no diagnosis found, look for a question
+        question_text = None
+        if not diagnosis:
+            question_text = extract_question(response)
+            
+            if not question_text:
+                # If no valid question format, skip this turn
+                continue
+                
+            # Still check if there's a diagnosis in the question text
+            diagnosis = extract_diagnosis(question_text)
         
         # Add doctor's response to conversation
         conversation.append({"role": "assistant", "content": response})
         
-        # Track questions for repetition detection
-        questions_asked.append(question_text)
+        # Track questions for repetition detection (if it's a question)
+        if question_text:
+            questions_asked.append(question_text)
         
         if diagnosis:
             final_diagnosis = diagnosis
@@ -406,6 +448,9 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=10, use_llm_patie
     # Calculate reward
     reward = 0.0
     
+    # Get the number of turns taken (length of conversation divided by 2)
+    num_turns = len(conversation) // 2
+    
     # Exact match reward
     if final_diagnosis:
         # Base reward for providing any diagnosis at all (even if it's wrong)
@@ -417,8 +462,25 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=10, use_llm_patie
             reward += 0.1
             
         if final_diagnosis.lower() == disease_info["disease_name"].lower():
-            # Exact match gets full reward
-            reward = 1.0
+            # Exact match gets variable reward based on speed
+            # Start with base reward of 1.0
+            base_reward = 1.0
+            
+            # Calculate speed bonus - earlier diagnoses get higher rewards
+            # Maximum bonus for diagnoses in 5 turns or fewer
+            if num_turns <= 5:
+                speed_bonus = 0.5  # Maximum speed bonus
+            else:
+                # Linearly decrease bonus as turns increase, up to turn 15
+                max_efficient_turns = 15
+                if num_turns <= max_efficient_turns:
+                    speed_bonus = 0.5 * (1 - (num_turns - 5) / (max_efficient_turns - 5))
+                else:
+                    speed_bonus = 0.0  # No speed bonus after max_efficient_turns
+            
+            # Apply total reward
+            reward = base_reward + speed_bonus
+            
         else:
             # Partial match reward - if disease name contains parts of real diagnosis
             disease_words = set(disease_info["disease_name"].lower().split())
@@ -426,7 +488,19 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=10, use_llm_patie
             common_words = disease_words.intersection(diagnosis_words)
             
             if len(common_words) > 0 and len(common_words) >= len(disease_words) / 3:
-                reward = 0.5  # Increased partial credit for related diagnosis (was 0.3)
+                reward = 0.5  # Increased partial credit for related diagnosis
+                
+                # Still give a small speed bonus for partial matches
+                if num_turns <= 5:
+                    speed_bonus = 0.2  # Smaller speed bonus for partial matches
+                else:
+                    max_efficient_turns = 15
+                    if num_turns <= max_efficient_turns:
+                        speed_bonus = 0.2 * (1 - (num_turns - 5) / (max_efficient_turns - 5))
+                    else:
+                        speed_bonus = 0.0
+                
+                reward += speed_bonus
     
     # Penalize for question repetition
     unique_questions = set([q.lower() for q in questions_asked])
@@ -596,7 +670,7 @@ class TrainingCallback(TrainerCallback):
                 print("\nGENERATING TEST CONVERSATION...")
                 try:
                     conversation, diagnosis, reward, _ = run_episode(
-                        self.model, self.tokenizer, disease, max_turns=8,
+                        self.model, self.tokenizer, disease, max_turns=16,
                         use_llm_patient=self.use_llm_patient
                     )
                     
@@ -615,10 +689,12 @@ class TrainingCallback(TrainerCallback):
                     if diagnosis:
                         print(f"\nFinal diagnosis: {diagnosis}")
                         print(f"Correct diagnosis: {disease['disease_name']}")
-                        print(f"Reward: {reward}")
+                        print(f"Turns taken: {len(conversation) // 2}")
+                        print(f"Reward: {reward:.2f}")
                     else:
                         print("\nNo final diagnosis provided")
-                        print(f"Reward: {reward}")
+                        print(f"Turns taken: {len(conversation) // 2}")
+                        print(f"Reward: {reward:.2f}")
                 except Exception as e:
                     print(f"Error generating test conversation: {e}")
                 
@@ -898,6 +974,8 @@ def interactive_diagnosis(model, tokenizer, simulation_mode=False):
         simulated_disease = generate_random_disease()
         print(f"[Simulation Mode - Patient has: {simulated_disease['disease_name']}]")
         print(f"[Symptoms: {', '.join([s.replace('_', ' ') for s, has in simulated_disease['symptoms'].items() if has])}]")
+        print(f"[Reward System: Base reward 1.0 for correct diagnosis + up to 0.5 bonus for speed]")
+        print(f"[Speed Bonus: Maximum +0.5 for diagnosis in 5 turns or fewer, decreasing to 0 after 15 turns]")
         
         # Start with a random symptom
         primary_symptoms = [s for s, has in simulated_disease["symptoms"].items() if has]
@@ -917,7 +995,7 @@ def interactive_diagnosis(model, tokenizer, simulation_mode=False):
         conversation.append({"role": "user", "content": initial_message})
     
     turn_count = 0
-    max_turns = 15  # Prevent infinite loops
+    max_turns = 30  # Doubled from 15 to prevent infinite loops
     
     while turn_count < max_turns:
         turn_count += 1
@@ -940,32 +1018,69 @@ def interactive_diagnosis(model, tokenizer, simulation_mode=False):
         )[0].outputs[0].text
         
         # Extract parts
-        question_text = extract_question(response)
         reasoning_text = extract_reasoning(response)
         
-        if not question_text:
-            print("Doctor: I need more information to make a diagnosis.")
-            question_text = "Can you tell me more about your symptoms?"
+        # Check for diagnosis first (in tags)
+        diagnosis = extract_diagnosis_tag(response)
         
-        # Display doctor's question
-        print(f"Doctor: {question_text}")
+        # If it's a diagnosis
+        if diagnosis:
+            # Display diagnosis with turn number
+            print(f"Doctor (Turn {turn_count}/{max_turns}): Final diagnosis: {diagnosis}")
+            
+            # Always show reasoning for diagnoses
+            if reasoning_text:
+                print(f"\n[Doctor's reasoning: {reasoning_text}]\n")
         
-        # Optionally show reasoning
-        if reasoning_text and random.random() < 0.3:  # Show reasoning occasionally
-            print(f"\n[Doctor's reasoning: {reasoning_text}]\n")
+        # If not a diagnosis, it's a question
+        else:
+            question_text = extract_question(response)
+            
+            if not question_text:
+                print("Doctor: I need more information to make a diagnosis.")
+                question_text = "Can you tell me more about your symptoms?"
+            else:
+                # Still check if there's a diagnosis in the question (old format)
+                diagnosis = extract_diagnosis(question_text)
+                
+                if not diagnosis:
+                    # Display doctor's question with turn number
+                    print(f"Doctor (Turn {turn_count}/{max_turns}): {question_text}")
+                    
+                    # Optionally show reasoning
+                    if reasoning_text and random.random() < 0.3:  # Show reasoning occasionally
+                        print(f"\n[Doctor's reasoning: {reasoning_text}]\n")
+                else:
+                    # It was a diagnosis in the question format
+                    print(f"Doctor (Turn {turn_count}/{max_turns}): Final diagnosis: {diagnosis}")
+                    
+                    # Always show reasoning for diagnoses
+                    if reasoning_text:
+                        print(f"\n[Doctor's reasoning: {reasoning_text}]\n")
         
         # Add to conversation
         conversation.append({"role": "assistant", "content": response})
         
-        # Check if this is a final diagnosis
-        diagnosis = extract_diagnosis(question_text)
+        # Check if we found a diagnosis and need to end the conversation
         if diagnosis:
-            # In simulation mode, verify the diagnosis
+            # In simulation mode, verify the diagnosis and calculate reward
             if simulation_mode:
+                # Calculate a simulated reward based on speed
+                speed_bonus = 0.0
+                if turn_count <= 5:
+                    speed_bonus = 0.5  # Maximum speed bonus
+                elif turn_count <= 15:
+                    speed_bonus = 0.5 * (1 - (turn_count - 5) / 10)  # Linear decrease
+                
                 if diagnosis.lower() == simulated_disease["disease_name"].lower():
-                    print("\n[Correct diagnosis! ✓]")
+                    reward = 1.0 + speed_bonus
+                    print(f"\n[Correct diagnosis! ✓]")
+                    print(f"[Turns taken: {turn_count}, Reward: {reward:.2f}]")
+                    print(f"[Speed bonus: +{speed_bonus:.2f} for diagnosing in {turn_count} turns]")
                 else:
+                    reward = 0.2  # Base reward for any diagnosis
                     print(f"\n[Incorrect diagnosis. The actual disease was: {simulated_disease['disease_name']}]")
+                    print(f"[Turns taken: {turn_count}, Reward: {reward:.2f}]")
             break
         
         # Get patient's response

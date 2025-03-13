@@ -22,11 +22,11 @@ MODEL_CONFIG = {
     "model_name": "unsloth/Llama-3.3-70B-Instruct-bnb-4bit",
     
     # Model parameters
-    "max_seq_length": 4096,  # Increased from 2048 to allow longer conversations
+    "max_seq_length": 8192,  # Doubled from 4096 to allow much longer conversations
     "load_in_4bit": True,  # Set to False for 16-bit training (higher VRAM usage)
     "fast_inference": True,
     "gpu_memory_utilization": 0.85,  # Adjusted for 70B model
-    "rope_scaling": {"type": "dynamic", "factor": 2.0},  # Helps with context window
+    "rope_scaling": {"type": "dynamic", "factor": 4.0},  # Doubled factor for expanded context window
     
     # LoRA parameters
     "lora_rank": 8,
@@ -58,10 +58,10 @@ TRAINING_CONFIG = {
 
 # Diagnostic Configuration
 DIAGNOSTIC_CONFIG = {
-    "max_turns": 12,  # Increased from 8 to allow more conversation turns
+    "max_turns": 24,  # Doubled from 12 to allow much more conversation turns
     "temperature": 0.7,
     "top_p": 0.95,
-    "max_tokens": 768,  # Increased from 512 to allow longer responses
+    "max_tokens": 1024,  # Increased from 768 to allow longer responses
 }
 
 # System Prompt (can be customized)
@@ -72,8 +72,8 @@ Follow these rules:
 2. Don't repeat questions you've already asked.
 3. When you have enough information, provide your final diagnosis in the format "Final diagnosis: [SPECIFIC DISEASE NAME]".
 4. Be concise and professional.
-5. You must provide a diagnosis by the 10th question at the latest, even if uncertain.
-6. If it's the 8th question or later, start considering your final diagnosis.
+5. You must provide a diagnosis by the 20th question at the latest, even if uncertain.
+6. If it's the 16th question or later, start considering your final diagnosis.
 
 Important diagnosis guidelines:
 - Always give a specific disease name, not a general description of symptoms
@@ -81,15 +81,26 @@ Important diagnosis guidelines:
 - If uncertain, still provide your best specific diagnosis based on the symptoms
 - Good examples: "Final diagnosis: Chronic Bronchitis" or "Final diagnosis: Migraine Headache"
 - Bad examples: "Final diagnosis: some kind of respiratory issue" or "Final diagnosis: a neurological condition"
+- Submit your diagnosis as soon as you're confident - earlier correct diagnoses receive higher rewards
+- The exact format "Final diagnosis: [SPECIFIC DISEASE NAME]" is required for the verification system
 
 Format your response as:
 <reasoning>
 Your internal reasoning about the patient's condition based on symptoms revealed so far.
-If this is the 8th question or later, you should be formulating your final diagnosis.
+If this is the 16th question or later, you should be formulating your final diagnosis.
 Consider which specific disease best matches the patient's symptoms.
 </reasoning>
 <question>
-Your next question to the patient OR your final diagnosis.
-If this is the 10th question or later, you MUST provide a final diagnosis with a specific disease name.
+Your next question to the patient.
 </question>
+
+OR, when you're ready to provide a diagnosis:
+
+<reasoning>
+Your internal reasoning explaining why you believe this is the correct diagnosis.
+Summarize the key symptoms and how they point to this specific disease.
+</reasoning>
+<diagnosis>
+Final diagnosis: [SPECIFIC DISEASE NAME]
+</diagnosis>
 """

@@ -55,7 +55,7 @@ def simulate_patient_response(question, disease_info, conversation_history=None)
     # Use the enhanced patient response function
     return patient_response(question, disease_info, conversation_history)
 
-def run_test_episode(model, tokenizer, disease_info=None, max_turns=10, verbose=True):
+def run_test_episode(model, tokenizer, disease_info=None, max_turns=20, verbose=True):
     """
     Run a diagnostic test episode with the trained model
     

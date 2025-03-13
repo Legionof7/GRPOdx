@@ -23,7 +23,7 @@ def main():
     print("Loading GRPODx Medical Diagnosis Agent...")
     
     # Load model parameters (matching training parameters)
-    max_seq_length = 4096  # Updated to match the new context window
+    max_seq_length = 8192  # Doubled from 4096 to allow much longer conversations
     lora_rank = 8
     
     # Load base model - using unsloth BNB 4-bit 70B model with HF transfer disabled
