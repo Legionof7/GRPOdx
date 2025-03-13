@@ -22,9 +22,9 @@ def main():
     max_seq_length = 4096  # Updated to match the new context window
     lora_rank = 8
     
-    # Load base model - updated to use Llama 3.3 70B
+    # Load base model - updated to use Llama 3 70B
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="unsloth/Llama-3.3-70B-Instruct-GGUF",
+        model_name="meta-llama/Meta-Llama-3-70B-Instruct",
         max_seq_length=max_seq_length,
         load_in_4bit=True,
         fast_inference=True,

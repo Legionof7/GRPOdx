@@ -8,7 +8,8 @@ This file contains configuration parameters that can be modified to customize th
 MODEL_CONFIG = {
     # Base model to use - will attempt these models in order until one works
     "model_options": [
-        "unsloth/Llama-3.3-70B-Instruct-GGUF",    # Primary large model
+        "meta-llama/Meta-Llama-3-70B-Instruct",   # Primary large model (official ID)
+        "unsloth/Llama-3-70B-Instruct",           # Unsloth mirror of 70B
         "meta-llama/meta-Llama-3.1-8B-Instruct",  # Secondary choice
         "unsloth/Llama-3.1-8B-Instruct",          # Unsloth mirror
         "unsloth/llama-3-8b-instruct",            # Alternative naming
@@ -18,13 +19,14 @@ MODEL_CONFIG = {
     ],
     
     # Legacy model name for backwards compatibility
-    "model_name": "unsloth/Llama-3.3-70B-Instruct-GGUF",
+    "model_name": "meta-llama/Meta-Llama-3-70B-Instruct",
     
     # Model parameters
     "max_seq_length": 4096,  # Increased from 2048 to allow longer conversations
     "load_in_4bit": True,  # Set to False for 16-bit training (higher VRAM usage)
     "fast_inference": True,
-    "gpu_memory_utilization": 0.9,  # Increased for 70B model
+    "gpu_memory_utilization": 0.85,  # Adjusted for 70B model
+    "rope_scaling": {"type": "dynamic", "factor": 2.0},  # Helps with context window
     
     # LoRA parameters
     "lora_rank": 8,
@@ -39,7 +41,7 @@ MODEL_CONFIG = {
 
 # Training Configuration
 TRAINING_CONFIG = {
-    "learning_rate": 2e-6,        # Reduced for 70B model
+    "learning_rate": 1e-6,        # Further reduced for 70B model
     "adam_beta1": 0.9,
     "adam_beta2": 0.99,
     "weight_decay": 0.1,
@@ -48,7 +50,7 @@ TRAINING_CONFIG = {
     "optim": "paged_adamw_8bit",
     "logging_steps": 1,
     "per_device_train_batch_size": 1,
-    "gradient_accumulation_steps": 2,  # Increased for 70B model
+    "gradient_accumulation_steps": 4,  # Further increased for 70B model
     "max_prompt_length": 1024,
     "max_grad_norm": 0.1,
     "output_dir": "outputs",
