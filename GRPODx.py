@@ -104,7 +104,7 @@ Do not include any explanatory text, ONLY return the JSON object."""
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": user_message}
             ],
-            temperature=0.8,  # Keep temperature high for variety while maintaining realistic symptoms
+            temperature=1.0,  # Higher temperature for more diverse disease generation
             max_tokens=500,
         )
         
@@ -229,7 +229,7 @@ Keep your responses relatively brief (1-3 sentences).
                 response = openai.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=self.chat_history,
-                    temperature=0.7,  # Keep variety while maintaining realistic responses
+                    temperature=1.0,  # Increased temperature for more varied patient responses
                     max_tokens=150,
                 )
 
@@ -363,9 +363,9 @@ Your final diagnosis here
             conversation, tokenize=False, add_generation_prompt=True
         )
 
-        # Set up generation parameters
+        # Set up generation parameters with increased temperature for more diversity
         sampling_params = SamplingParams(
-            temperature=0.7,
+            temperature=1.2,  # Increased for more diverse doctor responses
             top_p=0.95,
             max_tokens=256,
         )
@@ -412,7 +412,7 @@ Your final diagnosis here
 
         # Generate final response with diagnosis
         sampling_params = SamplingParams(
-            temperature=0.5,  # Lower temperature for more focused response
+            temperature=1.0,  # Higher temperature for more diverse diagnosis
             top_p=0.95,
             max_tokens=256,
         )
@@ -534,7 +534,7 @@ Grade the doctor's response from 0.0 to 1.0:"""
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": user_message}
             ],
-            temperature=0.1,
+            temperature=0.3,  # Increased temperature for more varied evaluations
             max_tokens=10,
         )
         
