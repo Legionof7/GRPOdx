@@ -43,7 +43,7 @@ def ensure_eager_attention(model_name):
 # ======================================================================
 
 # Model settings - using Phi-4 which has better GRPO compatibility
-MAX_SEQ_LENGTH = 512  # Context window size
+MAX_SEQ_LENGTH = 2048  # Increased context window for longer conversations
 LORA_RANK = 16  # Standard LoRA rank for Phi-4 as in the example
 MODEL_NAME = "unsloth/Phi-4"  # Phi-4 model (more compatible with GRPO)
 LOAD_IN_4BIT = True  # 4-bit quantization to fit in limited VRAM
@@ -302,7 +302,7 @@ def run_episode(
     tokenizer,
     lora_adapter,
     disease_info: Dict,
-    max_turns: int = 5,
+    max_turns: int = 3,  # Reduced to prevent exceeding context length
     use_gpt_patient: bool = True,
 ) -> Tuple[List[Dict], str, float]:
     """Run a single diagnostic conversation episode.
@@ -597,7 +597,10 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
 
     for completion in completions:
         content = completion[0]["content"]
-
+        
+        # Base reward for any response
+        base_reward = 0.1
+        
         # Extract the diagnosis from completion
         diagnosis = None
         diagnosis_match = re.search(r"final diagnosis:\s*([^.\n]+)", content.lower())
@@ -614,15 +617,33 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
         reasoning_match = re.search(r"<reasoning>(.*?)</reasoning>", content, re.DOTALL)
         if reasoning_match:
             reasoning = reasoning_match.group(1).strip()
-
-        # If no diagnosis found, assign zero reward
+            
+            # Reward for quality reasoning even without diagnosis
+            if not diagnosis and len(reasoning.split()) >= 30:
+                # Give a small reward for good reasoning even without diagnosis
+                symptom_analysis = sum(1 for symptom in disease_info[0]["symptoms"] 
+                                    if symptom in reasoning.lower())
+                if symptom_analysis > 0:
+                    # Some reward for discussing relevant symptoms
+                    rewards.append(max(0.3, base_reward + (symptom_analysis * 0.05)))
+                    continue
+        
+        # If no diagnosis found, but there was some attempt, give a minimal reward
         if not diagnosis:
-            rewards.append(0.0)
+            # Check if there was at least an attempt at reasoning
+            if "<reasoning>" in content or "symptoms" in content.lower():
+                rewards.append(base_reward + 0.1)
+            else:
+                rewards.append(base_reward)
             continue
 
         # Calculate the reward using GPT-4o-mini
-        reward = calculate_numerical_reward(diagnosis, disease_info[0], reasoning)
-        rewards.append(reward)
+        diagnosis_reward = calculate_numerical_reward(diagnosis, disease_info[0], reasoning)
+        
+        # Combine base reward with diagnosis reward
+        # This ensures even poor diagnoses get some minimal feedback
+        final_reward = max(base_reward + 0.1, diagnosis_reward)
+        rewards.append(final_reward)
 
     return rewards
 
@@ -642,6 +663,9 @@ def format_reward_function(completions, **kwargs) -> List[float]:
         content = completion[0]["content"]
         reward = 0.0
 
+        # Base reward for any response to encourage participation
+        reward += 0.1
+
         # Check for reasoning section with proper XML tags
         if "<reasoning>" in content and "</reasoning>" in content:
             reward += 0.5
@@ -650,14 +674,23 @@ def format_reward_function(completions, **kwargs) -> List[float]:
             reasoning = re.search(r"<reasoning>(.*?)</reasoning>", content, re.DOTALL)
             if reasoning:
                 reasoning_text = reasoning.group(1).strip()
-                if (
-                    len(reasoning_text.split()) >= 30
-                ):  # Good reasoning has at least 30 words
+                if len(reasoning_text.split()) >= 30:  # Good reasoning has at least 30 words
                     reward += 0.25
-
+                # Add even more reward for particularly detailed reasoning
+                if len(reasoning_text.split()) >= 60:
+                    reward += 0.15
+        
+        # Even partial reasoning gets some credit
+        elif "<reasoning>" in content:
+            reward += 0.2
+            
         # Check for answer section with proper XML tags
         if "<answer>" in content and "</answer>" in content:
             reward += 0.25
+        
+        # Check for diagnosis formatting
+        if "final diagnosis:" in content.lower():
+            reward += 0.3
 
         rewards.append(reward)
 
@@ -971,8 +1004,8 @@ class OnlineGRPOTrainer:
             self.batch_size = self.num_generations
             print(f"Setting batch_size to {self.batch_size}")
         
-        # Phi-4 GRPO configuration from example
-        max_prompt_length = 256  # Standard prompt length for GRPO
+        # Phi-4 GRPO configuration with adjusted prompt length
+        max_prompt_length = 1024  # Increased to allow for longer conversations
         
         self.training_args = GRPOConfig(
             learning_rate=5e-6,
@@ -1272,8 +1305,8 @@ def main():
             
             # Configure GRPO training
             print("Configuring GRPO trainer...")
-            # Phi-4 GRPO configuration from example
-            max_prompt_length = 256  # Standard prompt length for GRPO
+            # Phi-4 GRPO configuration with adjusted prompt length
+            max_prompt_length = 1024  # Increased to allow for longer conversations
             
             training_args = GRPOConfig(
                 learning_rate=5e-6,
@@ -1325,7 +1358,7 @@ def main():
                 max_steps=args.steps,
                 batch_size=BATCH_SIZE,
                 num_generations=NUM_GENERATIONS,
-                max_turns=5,
+                max_turns=3,  # Reduced to prevent exceeding context length
                 use_gpt_patient=args.use_gpt_patient or True,
                 output_dir=OUTPUT_DIR
             )
