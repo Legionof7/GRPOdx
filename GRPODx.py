@@ -25,6 +25,8 @@ from datasets import Dataset
 from trl import GRPOConfig, GRPOTrainer
 from vllm import SamplingParams
 
+# Use standard GRPO approach from notebook
+
 # ======================================================================
 # Configuration
 # ======================================================================
@@ -37,9 +39,9 @@ LOAD_IN_4BIT = True  # 4-bit quantization to fit in limited VRAM
 
 # Training settings
 MAX_STEPS = 300  # Number of training steps
-BATCH_SIZE = 4  # Batch size per device (must be divisible by NUM_GENERATIONS)
-GRAD_ACCUMULATION = 4  # Gradient accumulation steps
-NUM_GENERATIONS = 4  # Number of completions per scenario for GRPO
+BATCH_SIZE = 1  # Batch size per device (following notebook)
+GRAD_ACCUMULATION = 1  # Gradient accumulation steps (increase for smoother training)
+NUM_GENERATIONS = 6  # Number of completions per scenario for GRPO (from notebook)
 
 # Paths
 OUTPUT_DIR = "outputs"
@@ -958,7 +960,9 @@ class OnlineGRPOTrainer:
             self.batch_size = self.num_generations
             print(f"Setting batch_size to {self.batch_size}")
         
-        # Configure GRPO training
+        # Configure GRPO training - matching notebook
+        max_prompt_length = 256  # Using shorter prompt length as in notebook
+        
         self.training_args = GRPOConfig(
             learning_rate=5e-6,
             adam_beta1=0.9,
@@ -969,18 +973,15 @@ class OnlineGRPOTrainer:
             optim="paged_adamw_8bit",
             logging_steps=1,
             per_device_train_batch_size=self.batch_size,
-            gradient_accumulation_steps=4,
+            gradient_accumulation_steps=GRAD_ACCUMULATION,
             num_generations=self.num_generations,
-            max_prompt_length=512,
-            max_completion_length=MAX_SEQ_LENGTH - 512,
+            max_prompt_length=max_prompt_length,
+            max_completion_length=MAX_SEQ_LENGTH - max_prompt_length,
             max_steps=1,  # Train for 1 step at a time for online learning
             save_steps=50,
             max_grad_norm=0.1,
             report_to="none",
             output_dir=self.output_dir,
-            torch_compile=False,  # Disable torch.compile to avoid tensor dimension issues
-            bf16=True,  # Use bf16 precision
-            # Note: torch_fsdp parameter is not supported in this version
         )
         
         # Track progress
@@ -1217,12 +1218,13 @@ def main():
     if not (args.train or args.test or args.interact or args.simulate):
         args.train = True
         
-    # If offline flag is set, it overrides the online flag
+    # Handle flags - offline overrides online
     if args.offline:
         args.online = False
 
     # Load model and tokenizer
     print("Loading model and tokenizer...")
+    # Load model with eager attention for Gemma and notebook-aligned settings
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=MODEL_NAME,
         max_seq_length=MAX_SEQ_LENGTH,
@@ -1261,6 +1263,9 @@ def main():
             
             # Configure GRPO training
             print("Configuring GRPO trainer...")
+            # Configure GRPO training - matching notebook example
+            max_prompt_length = 256  # Using shorter prompt length as in notebook
+            
             training_args = GRPOConfig(
                 learning_rate=5e-6,
                 adam_beta1=0.9,
@@ -1273,16 +1278,13 @@ def main():
                 per_device_train_batch_size=BATCH_SIZE,
                 gradient_accumulation_steps=GRAD_ACCUMULATION,
                 num_generations=NUM_GENERATIONS,
-                max_prompt_length=512,
-                max_completion_length=MAX_SEQ_LENGTH - 512,
+                max_prompt_length=max_prompt_length,
+                max_completion_length=MAX_SEQ_LENGTH - max_prompt_length,
                 max_steps=args.steps,
-                save_steps=100,
+                save_steps=50,
                 max_grad_norm=0.1,
                 report_to="none",
                 output_dir=OUTPUT_DIR,
-                torch_compile=False,  # Disable torch.compile to avoid tensor dimension issues
-                bf16=True,  # Use bf16 precision
-                # Note: torch_fsdp parameter is not supported in this version
             )
 
             # Create GRPO trainer
