@@ -133,24 +133,88 @@ def patient_response(question, disease_info):
 
 # Extract parts from model output
 def extract_reasoning(text):
-    reasoning_pattern = r"<reasoning>(.*?)</reasoning>"
-    match = re.search(reasoning_pattern, text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
+    """Extract the reasoning from text, with safety checks"""
+    # Safety check for None or non-string values
+    if text is None:
+        return None
+    
+    # Ensure text is a string
+    if not isinstance(text, str):
+        try:
+            text = str(text)
+        except:
+            return None
+    
+    # Search for reasoning pattern
+    try:
+        reasoning_pattern = r"<reasoning>(.*?)</reasoning>"
+        match = re.search(reasoning_pattern, text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+    except Exception as e:
+        print(f"Warning: Error extracting reasoning: {e}")
+        
     return None
 
 def extract_question(text):
-    question_pattern = r"<question>(.*?)</question>"
-    match = re.search(question_pattern, text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
+    """Extract the question from text, with safety checks"""
+    # Safety check for None or non-string values
+    if text is None:
+        return None
+    
+    # Ensure text is a string
+    if not isinstance(text, str):
+        try:
+            text = str(text)
+        except:
+            return None
+    
+    # Search for question pattern in XML format
+    try:
+        question_pattern = r"<question>(.*?)</question>"
+        match = re.search(question_pattern, text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+    except Exception as e:
+        print(f"Warning: Error extracting question: {e}")
+    
+    # If no XML tags found, try to return the text itself if it looks like a question
+    if text and "?" in text:
+        return text
+    
     return None
 
 def extract_diagnosis(text):
-    diagnosis_pattern = r"Final diagnosis: ([A-Za-z\s\-]+)"
-    match = re.search(diagnosis_pattern, text)
-    if match:
-        return match.group(1).strip()
+    """Extract the diagnosis from text, with safety checks"""
+    # Safety check for None or non-string values
+    if text is None:
+        return None
+    
+    # Ensure text is a string
+    if not isinstance(text, str):
+        try:
+            text = str(text)
+        except:
+            return None
+    
+    # Search for diagnosis pattern
+    try:
+        diagnosis_pattern = r"Final diagnosis: ([A-Za-z\s\-]+)"
+        match = re.search(diagnosis_pattern, text)
+        if match:
+            return match.group(1).strip()
+    except Exception as e:
+        print(f"Warning: Error extracting diagnosis: {e}")
+    
+    # Alternative pattern in case the format is different
+    try:
+        alt_pattern = r"diagnosis:?\s*([A-Za-z\s\-]+)"
+        match = re.search(alt_pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    except:
+        pass
+    
     return None
 
 # Episode simulation
@@ -427,16 +491,31 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6):
         disease_names = [str(name) for name in disease_names if name]
         
         for completion in completions:
-            # Handle different completion formats - could be a string or a dict
-            if isinstance(completion, list) and len(completion) > 0:
-                if isinstance(completion[0], dict) and "content" in completion[0]:
-                    response = completion[0]["content"]
+            # Handle different completion formats with robust error handling
+            try:
+                # Handle different completion formats - could be a string or a dict
+                if isinstance(completion, list) and len(completion) > 0:
+                    if isinstance(completion[0], dict) and "content" in completion[0]:
+                        response = completion[0]["content"]
+                    else:
+                        response = str(completion[0])
+                elif isinstance(completion, dict):
+                    if "content" in completion:
+                        response = completion["content"]
+                    elif "text" in completion:
+                        response = completion["text"]
+                    else:
+                        response = str(completion)
+                elif isinstance(completion, str):
+                    response = completion
                 else:
-                    response = str(completion[0])
-            elif isinstance(completion, dict) and "content" in completion:
-                response = completion["content"]
-            else:
-                response = str(completion)
+                    response = str(completion)
+            except Exception as e:
+                print(f"Warning: Error parsing completion: {e}")
+                try:
+                    response = str(completion)
+                except:
+                    response = "Error parsing completion"
             
             # Get diagnosis from response
             diagnosis = extract_diagnosis(extract_question(response))
