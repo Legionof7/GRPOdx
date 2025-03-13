@@ -18,10 +18,11 @@ import random
 import re
 from typing import Dict, List, Optional, Tuple
 
+# Import unsloth first as recommended
+from unsloth import FastLanguageModel
 import openai
 from datasets import Dataset
 from trl import GRPOConfig, GRPOTrainer
-from unsloth import FastLanguageModel
 from vllm import SamplingParams
 
 # ======================================================================
