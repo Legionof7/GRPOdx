@@ -386,7 +386,16 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=10, use_llm_patie
     
     # Exact match reward
     if final_diagnosis:
+        # Base reward for providing any diagnosis at all (even if it's wrong)
+        reward = 0.2
+        
+        # Add an extra 0.1 if the diagnosis has an actual disease name (not just a description)
+        # This encourages specific diagnoses over vague ones
+        if any(word[0].isupper() for word in final_diagnosis.split()):
+            reward += 0.1
+            
         if final_diagnosis.lower() == disease_info["disease_name"].lower():
+            # Exact match gets full reward
             reward = 1.0
         else:
             # Partial match reward - if disease name contains parts of real diagnosis
@@ -395,7 +404,7 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=10, use_llm_patie
             common_words = disease_words.intersection(diagnosis_words)
             
             if len(common_words) > 0 and len(common_words) >= len(disease_words) / 3:
-                reward = 0.3  # Partial credit for related diagnosis
+                reward = 0.5  # Increased partial credit for related diagnosis (was 0.3)
     
     # Penalize for question repetition
     unique_questions = set([q.lower() for q in questions_asked])
@@ -775,7 +784,13 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbos
                 reward = 0.0
             else:
                 # Base reward for providing any diagnosis in correct format
-                reward = 0.3
+                # Even a vague diagnosis should get something, to encourage diagnosis over no diagnosis
+                reward = 0.2
+                
+                # Add an extra 0.1 if the diagnosis has an actual disease name (not just a description)
+                # This encourages specific diagnoses over vague ones
+                if any(word[0].isupper() for word in diagnosis.split()):
+                    reward += 0.1
                 
                 # Try to match with the correct disease for this scenario
                 correct_disease = scenario_diseases[i % len(scenario_diseases)] if scenario_diseases else None
