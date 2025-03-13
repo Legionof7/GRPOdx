@@ -815,36 +815,86 @@ def calculate_verdict_reward(diagnosis, disease_info, conversation, num_turns=0)
                     
         claim = f"{conv_summary}\nDiagnosis: {diagnosis}"
         
-        # Create a judge that directly scores the diagnostic quality
-        from verdict.scale import IntervalScale
-        from verdict.common.judge import IntervalJudgeUnit
+        # Check if IntervalScale is available
+        # In newer versions of verdict, it might be using a different name or approach
+        try:
+            # Try to import IntervalScale first
+            print("Checking for IntervalScale in verdict.scale...")
+            from verdict.scale import IntervalScale
+            print("Successfully imported IntervalScale")
+            
+            # If available, import IntervalJudgeUnit too
+            from verdict.common.judge import IntervalJudgeUnit
+            print("Successfully imported IntervalJudgeUnit")
+            
+            # Now use these classes to create the judge
+            interval_scale_available = True
+        except ImportError as e:
+            print(f"IntervalScale not available in this verdict version: {e}")
+            print("Will use CategoricalJudgeUnit with custom scoring instead")
+            interval_scale_available = False
         
-        diagnostic_judge = IntervalJudgeUnit(
-            name='DiagnosticScorer', 
-            scale=IntervalScale([0.0, 1.0]),
-            explanation=True
-        ).prompt("""
-            Evaluate the diagnostic quality of the provided diagnosis against the disease information.
-            Score the diagnosis on a scale from 0.0 to 1.0, where:
+        if interval_scale_available:
+            # Use IntervalJudgeUnit if available
+            diagnostic_judge = IntervalJudgeUnit(
+                name='DiagnosticScorer', 
+                scale=IntervalScale([0.0, 1.0]),
+                explanation=True
+            ).prompt("""
+                Evaluate the diagnostic quality of the provided diagnosis against the disease information.
+                Score the diagnosis on a scale from 0.0 to 1.0, where:
+                
+                - 1.0: Perfect diagnosis that exactly matches the correct disease
+                - 0.8-0.9: Very strong diagnosis that identifies the correct disease with minor imprecision
+                - 0.6-0.7: Good diagnosis that identifies a closely related condition
+                - 0.4-0.5: Partial diagnosis that identifies some aspects of the condition
+                - 0.2-0.3: Poor diagnosis with minimal connection to the correct disease
+                - 0.0-0.1: Completely incorrect diagnosis
+                
+                Disease Information: {source.doc}
+                Diagnostic Process and Conclusion: {source.claim}
+                
+                Consider:
+                1. Accuracy: How well does the diagnosis match the actual disease?
+                2. Completeness: Does the diagnosis capture all key aspects of the disease?
+                3. Specificity: Is the diagnosis appropriately specific (not too vague)?
+                4. Clinical Relevance: Would the diagnosis lead to appropriate management?
+                
+                Score:
+            """).via(policy_or_name=model_to_use, retries=1, temperature=0.2)
+        else:
+            # Fallback to CategoricalJudgeUnit with custom prompt for numerical scoring
+            from verdict.scale import DiscreteScale
             
-            - 1.0: Perfect diagnosis that exactly matches the correct disease
-            - 0.8-0.9: Very strong diagnosis that identifies the correct disease with minor imprecision
-            - 0.6-0.7: Good diagnosis that identifies a closely related condition
-            - 0.4-0.5: Partial diagnosis that identifies some aspects of the condition
-            - 0.2-0.3: Poor diagnosis with minimal connection to the correct disease
-            - 0.0-0.1: Completely incorrect diagnosis
-            
-            Disease Information: {source.doc}
-            Diagnostic Process and Conclusion: {source.claim}
-            
-            Consider:
-            1. Accuracy: How well does the diagnosis match the actual disease?
-            2. Completeness: Does the diagnosis capture all key aspects of the disease?
-            3. Specificity: Is the diagnosis appropriately specific (not too vague)?
-            4. Clinical Relevance: Would the diagnosis lead to appropriate management?
-            
-            Score:
-        """).via(policy_or_name=model_to_use, retries=1, temperature=0.2)
+            # Create a discrete scale with a numeric scoring system
+            diagnostic_judge = CategoricalJudgeUnit(
+                name='DiagnosticScorer',
+                categories=DiscreteScale(['1.0', '0.9', '0.8', '0.7', '0.6', '0.5', '0.4', '0.3', '0.2', '0.1', '0.0']),
+                explanation=True
+            ).prompt("""
+                Evaluate the diagnostic quality of the provided diagnosis against the disease information.
+                Score the diagnosis on a scale from 0.0 to 1.0, where:
+                
+                - 1.0: Perfect diagnosis that exactly matches the correct disease
+                - 0.8-0.9: Very strong diagnosis that identifies the correct disease with minor imprecision
+                - 0.6-0.7: Good diagnosis that identifies a closely related condition
+                - 0.4-0.5: Partial diagnosis that identifies some aspects of the condition
+                - 0.2-0.3: Poor diagnosis with minimal connection to the correct disease
+                - 0.0-0.1: Completely incorrect diagnosis
+                
+                Disease Information: {source.doc}
+                Diagnostic Process and Conclusion: {source.claim}
+                
+                Consider:
+                1. Accuracy: How well does the diagnosis match the actual disease?
+                2. Completeness: Does the diagnosis capture all key aspects of the disease?
+                3. Specificity: Is the diagnosis appropriately specific (not too vague)?
+                4. Clinical Relevance: Would the diagnosis lead to appropriate management?
+                
+                You MUST select one of these exact values as your response: 1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, or 0.0.
+                
+                Score:
+            """).via(policy_or_name=model_to_use, retries=1, temperature=0.2)
         
         # Create a pipeline with just the single scoring judge
         pipeline = Pipeline() >> diagnostic_judge
@@ -855,40 +905,77 @@ def calculate_verdict_reward(diagnosis, disease_info, conversation, num_turns=0)
         # Run the verdict pipeline
         response, _ = pipeline.run(test_sample, max_workers=1)
         
-        # Extract the numeric score (should be between 0.0 and 1.0)
-        score_key = list(filter(lambda k: '_score' in k or '_value' in k, response.keys()))[0]
+        # Extract the score from the response (either score or choice depending on judge type)
+        print(f"Response keys from verdict: {list(response.keys())}")
+        
         try:
-            # Get the raw score from the judge
-            judge_score = float(response[score_key])
+            if interval_scale_available:
+                # When using IntervalJudgeUnit, look for '_score' or '_value' keys
+                score_key = list(filter(lambda k: '_score' in k or '_value' in k, response.keys()))[0]
+                print(f"Found score key: {score_key}")
+                
+                # Get the raw score from the judge
+                judge_score = float(response[score_key])
+                print(f"Raw score from IntervalJudgeUnit: {judge_score}")
+            else:
+                # When using CategoricalJudgeUnit, look for '_choice' key
+                choice_key = list(filter(lambda k: '_choice' in k, response.keys()))[0]
+                print(f"Found choice key: {choice_key}")
+                
+                # Convert the string choice to a float
+                judge_score = float(response[choice_key])
+                print(f"Score from CategoricalJudgeUnit: {judge_score}")
             
             # Ensure it's within valid range
             base_reward = max(0.0, min(1.0, judge_score))
             
             # Round to 2 decimal places for clarity
             base_reward = round(base_reward, 2)
+            print(f"Final base reward after validation: {base_reward}")
             
             # Extract the explanation if available
-            explanation_key = list(filter(lambda k: '_explanation' in k, response.keys()))[0]
-            if explanation_key in response:
-                print(f"Verdict explanation: {response[explanation_key]}")
-        except (ValueError, TypeError):
+            explanation_keys = list(filter(lambda k: '_explanation' in k, response.keys()))
+            if explanation_keys:
+                explanation_key = explanation_keys[0]
+                if explanation_key in response:
+                    print(f"Verdict explanation: {response[explanation_key]}")
+        except (ValueError, TypeError, IndexError) as e:
             # Fall back to a default method if score parsing fails
-            print("Failed to parse score from Verdict, using fallback scoring")
+            print(f"Failed to parse score from Verdict: {e}")
+            print("Response contents:", response)
+            print("Using fallback scoring")
             
-            # Find any 'yes'/'no' assessment that might exist
-            yes_no_key = list(filter(lambda k: '_choice' in k, response.keys()))
-            if yes_no_key and response[yes_no_key[0]] == 'yes':
-                base_reward = 0.85  # Default high score for 'yes'
-            else:
-                # Check for partial match based on word overlap
-                disease_words = set(disease_info["disease_name"].lower().split())
-                diagnosis_words = set(diagnosis.lower().split())
-                common_words = disease_words.intersection(diagnosis_words)
-                
-                if len(common_words) > 0 and len(common_words) >= len(disease_words) / 3:
-                    base_reward = 0.4  # Partial credit for related diagnosis
+            # Try to find any numerical values in the response that might represent a score
+            for key, value in response.items():
+                if isinstance(value, str) and any(x in value for x in ['0.', '1.', '0,', '1,']):
+                    print(f"Found potential score in {key}: {value}")
+                    try:
+                        # Try to extract a float from the string
+                        import re
+                        match = re.search(r'(0\.\d+|1\.0|1)', value)
+                        if match:
+                            base_reward = float(match.group(0))
+                            print(f"Extracted score: {base_reward}")
+                            break
+                    except:
+                        pass
+            
+            # If still no score found, check for yes/no or try word overlap
+            if 'base_reward' not in locals():
+                # Find any 'yes'/'no' assessment that might exist
+                yes_no_key = list(filter(lambda k: '_choice' in k, response.keys()))
+                if yes_no_key and response[yes_no_key[0]] == 'yes':
+                    base_reward = 0.85  # Default high score for 'yes'
                 else:
-                    base_reward = 0.1  # Minimal credit
+                    # Check for partial match based on word overlap
+                    disease_words = set(disease_info["disease_name"].lower().split())
+                    diagnosis_words = set(diagnosis.lower().split())
+                    common_words = disease_words.intersection(diagnosis_words)
+                    
+                    if len(common_words) > 0 and len(common_words) >= len(disease_words) / 3:
+                        base_reward = 0.4  # Partial credit for related diagnosis
+                    else:
+                        base_reward = 0.1  # Minimal credit
         
         # Add speed bonus for both correct and partially correct diagnoses
         speed_bonus = 0.0
