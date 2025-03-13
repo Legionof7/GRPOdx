@@ -519,17 +519,40 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=20, use_llm_patie
                 # Handle potential SDPA alignment errors by falling back to safer generation
                 print(f"Generation error: {str(err)}")
                 print("Trying with safer generation parameters...")
-                with torch.no_grad():
-                    outputs = model.generate(
-                        **inputs,
-                        max_new_tokens=512,  # Reduced token count
-                        temperature=0.7,
-                        top_p=0.95,
-                        do_sample=True,
-                        pad_token_id=tokenizer.pad_token_id,
-                        use_cache=True,
-                        num_beams=1,  # Disable beam search
-                    )
+                try:
+                    with torch.no_grad():
+                        # Try the most basic generation with all advanced features disabled
+                        print("Using most basic generation settings with flash attention disabled")
+                        outputs = model.generate(
+                            **inputs,
+                            max_new_tokens=128,  # Very short response
+                            temperature=0.7,
+                            top_p=0.95,
+                            do_sample=True,
+                            pad_token_id=tokenizer.pad_token_id,
+                            use_cache=True,
+                            num_beams=1,  # Disable beam search
+                            flash_attn=False,  # Disable flash attention
+                            torch_dtype=torch.float32,  # Use full precision
+                            use_sdpa=False,  # Disable scaled dot product attention
+                        )
+                except RuntimeError as err2:
+                    # Last resort: generate a simple fixed response
+                    print(f"Still getting generation error: {str(err2)}")
+                    print("Using EMERGENCY FALLBACK - fixed response")
+                    
+                    # Create a fake output with input_ids + a few tokens for "What symptoms are you experiencing?"
+                    input_length = inputs.input_ids.shape[1]
+                    if hasattr(tokenizer, 'encode'):
+                        emergency_text = tokenizer.encode("What symptoms are you experiencing?", 
+                                                          add_special_tokens=False, 
+                                                          return_tensors="pt").to(model.device)
+                    else:
+                        # If encode doesn't work, create a simple tensor of token IDs
+                        emergency_text = torch.tensor([[100, 200, 300]], device=model.device)
+                    
+                    # Concatenate the input_ids with the emergency response
+                    outputs = torch.cat([inputs.input_ids, emergency_text], dim=1)
             
             # Decode the generated tokens
             response = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)

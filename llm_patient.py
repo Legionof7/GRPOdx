@@ -183,15 +183,21 @@ IMPORTANT RULES:
                 print(f"[Patient] Generation error: {str(err)}")
                 print("[Patient] Trying with safer generation parameters...")
                 with torch.no_grad():
+                    # Try the most basic generation with all advanced features disabled
+                    print("[Patient] Using most basic generation settings with flash attention disabled")
+                    import torch
                     outputs = self.model.generate(
                         **inputs,
-                        max_new_tokens=50,  # Reduced token count
+                        max_new_tokens=50,  # Very short response
                         temperature=0.7,
                         top_p=0.95,
                         do_sample=True,
                         pad_token_id=self.tokenizer.pad_token_id,
                         use_cache=True,
                         num_beams=1,  # Disable beam search
+                        flash_attn=False,  # Disable flash attention
+                        torch_dtype=torch.float32,  # Use full precision
+                        use_sdpa=False,  # Disable scaled dot product attention
                     )
             
             # Decode the generated tokens
