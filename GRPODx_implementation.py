@@ -686,30 +686,48 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbos
         """Custom reward function for GRPODx"""
         rewards = []
         
-        # Extract disease names from dataset 
-        disease_names = []
+        # Extract prompt information to get the correct disease for each scenario
+        scenario_diseases = []
+        for prompt in prompts:
+            # Try to extract the disease name from the prompt (context)
+            disease_name = None
+            try:
+                # First check if we have a direct reference to the disease in the context
+                if isinstance(prompt, dict) and "context" in prompt:
+                    # Try to extract disease name from the context
+                    match = re.search(r"disease is ([A-Za-z\s\-]+)", prompt["context"], re.IGNORECASE)
+                    if match:
+                        disease_name = match.group(1).strip()
+                # If we can't find a direct reference, look at cached diseases
+                if not disease_name and len(disease_cache) > 0:
+                    # Use the most recently added disease as a fallback
+                    disease_name = disease_cache[-1].get("disease_name", "")
+            except Exception as e:
+                print(f"Warning: Error extracting disease from prompt: {e}")
+            
+            scenario_diseases.append(disease_name)
+            
+        # Extract all known disease names as a fallback
+        all_disease_names = []
         try:
             # First try to get disease names from the training dataset
             if hasattr(initial_dataset, 'features') and 'disease_name' in initial_dataset.features:
-                disease_names = list(set(initial_dataset['disease_name']))
+                all_disease_names = list(set(initial_dataset['disease_name']))
         except Exception as e:
             print(f"Warning: Could not extract disease names from dataset: {e}")
         
         # Add example disease names as fallback
         example_diseases = [d["disease_name"] for d in DISEASE_EXAMPLES]
-        disease_names.extend(example_diseases)
-        
-        # We can't reference the trainer here as it doesn't exist yet
-        # Just use the disease_cache directly
+        all_disease_names.extend(example_diseases)
             
         # Add any generated diseases
         if len(disease_cache) > 0:
-            disease_names.extend([d.get("disease_name", "") for d in disease_cache])
+            all_disease_names.extend([d.get("disease_name", "") for d in disease_cache])
         
         # Ensure all disease names are strings
-        disease_names = [str(name) for name in disease_names if name]
+        all_disease_names = [str(name) for name in all_disease_names if name]
         
-        for completion in completions:
+        for i, completion in enumerate(completions):
             # Handle different completion formats with robust error handling
             try:
                 # Handle different completion formats - could be a string or a dict
@@ -739,24 +757,45 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbos
             # Get diagnosis from response
             diagnosis = extract_diagnosis(extract_question(response))
             
-            # Basic reward - can be expanded with partial matching etc.
+            # Initialize reward
             reward = 0.0
-            if diagnosis:
+            
+            # If no diagnosis, no base reward (discourages non-diagnostic responses)
+            if not diagnosis:
+                # The model should only get 0 reward here, not a small positive reward
+                reward = 0.0
+            else:
                 # Base reward for providing any diagnosis in correct format
-                reward = 0.5
+                reward = 0.3
                 
-                # Check against known disease names
-                for disease_name in disease_names:
-                    if disease_name.lower() in diagnosis.lower():
-                        reward = 1.0
-                        break
+                # Try to match with the correct disease for this scenario
+                correct_disease = scenario_diseases[i % len(scenario_diseases)] if scenario_diseases else None
                 
-                # If we see XML tags, that's good formatting
+                if correct_disease and correct_disease.lower() == diagnosis.lower():
+                    # Perfect match with correct disease - highest reward
+                    reward = 1.0
+                elif correct_disease and correct_disease.lower() in diagnosis.lower():
+                    # Partial match with correct disease
+                    reward = 0.8
+                else:
+                    # Check if it matches any known disease name (less valuable than correct match)
+                    for disease_name in all_disease_names:
+                        if disease_name.lower() in diagnosis.lower():
+                            reward = 0.5  # Better than random text, but not the right disease
+                            break
+                
+                # Bonus for good formatting with XML tags
                 if "<reasoning>" in response and "</reasoning>" in response:
-                    reward += 0.2
+                    reward += 0.1
                 
                 if "<question>" in response and "</question>" in response:
-                    reward += 0.2
+                    reward += 0.1
+                
+                # Check for question quality
+                questions_count = response.count("<question>")
+                if questions_count > 1:
+                    # Penalize for asking multiple questions at once
+                    reward -= 0.1 * (questions_count - 1)
             
             rewards.append(reward)
         
