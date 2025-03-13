@@ -39,7 +39,7 @@ def ensure_eager_attention(model_name):
 # ======================================================================
 
 # Model settings - using Phi-4 which has better GRPO compatibility
-MAX_SEQ_LENGTH = 8192  # Significantly increased context window for much longer conversations
+MAX_SEQ_LENGTH = 4096  # Reduced to prevent CUDA OOM errors
 LORA_RANK = 16  # Standard LoRA rank for Phi-4 as in the example
 MODEL_NAME = "unsloth/Phi-4"  # Phi-4 model (more compatible with GRPO)
 LOAD_IN_4BIT = True  # 4-bit quantization to fit in limited VRAM
@@ -309,7 +309,7 @@ def run_episode(
     tokenizer,
     lora_adapter,
     disease_info: Dict,
-    max_turns: int = 10,  # Increased for more thorough diagnostic conversations
+    max_turns: int = 5,  # Reduced to prevent CUDA OOM errors
     use_gpt_patient: bool = True,
 ) -> Tuple[List[Dict], str, float]:
     """Run a single diagnostic conversation episode.
@@ -669,7 +669,28 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
     Returns:
         List of reward values between 0 and 1
     """
-    print("Using Verdict-based evaluation function")
+    try:
+        # Try to ensure verdict_eval is properly imported at runtime
+        import sys
+        import os
+        
+        # Add the project root to path to ensure imports work
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        if project_root not in sys.path:
+            sys.path.append(project_root)
+            
+        # Force import here to verify it works
+        try:
+            from verdict_eval import evaluate_diagnosis as _verify_import
+            print("Successfully verified Verdict evaluation import")
+        except ImportError as e:
+            print(f"Warning: Verdict import failed: {e}")
+            print("Will use fallback evaluation")
+            
+    except Exception as e:
+        print(f"Setup error: {e}")
+        
+    print("Using reward evaluation function")
     
     rewards = []
     print("Calculating rewards...")
@@ -1319,7 +1340,7 @@ def main():
         load_in_4bit=LOAD_IN_4BIT,
         fast_inference=True,  # Enable vLLM fast inference
         max_lora_rank=LORA_RANK,
-        gpu_memory_utilization=0.6,  # Adjust based on available VRAM
+        gpu_memory_utilization=0.5,  # Reduced to prevent CUDA OOM errors
         attn_implementation="eager",  # Use eager implementation for Gemma as recommended
     )
 
@@ -1400,7 +1421,7 @@ def main():
                 max_steps=args.steps,
                 batch_size=BATCH_SIZE,
                 num_generations=NUM_GENERATIONS,
-                max_turns=10,  # Increased for more thorough diagnostic conversations
+                max_turns=5,  # Reduced to prevent CUDA OOM errors
                 use_gpt_patient=args.use_gpt_patient or True,
                 output_dir=OUTPUT_DIR
             )
