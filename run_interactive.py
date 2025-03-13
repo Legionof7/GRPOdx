@@ -4,6 +4,10 @@ Interactive script for GRPODx Medical Diagnosis Agent.
 This script loads a trained model and runs an interactive diagnostic session.
 """
 
+import os
+# Disable HF transfer to fix download issues
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+
 import argparse
 import sys
 from unsloth import FastLanguageModel

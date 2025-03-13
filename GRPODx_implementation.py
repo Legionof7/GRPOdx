@@ -10,6 +10,10 @@ agent that can conduct multi-turn conversations with patients and make diagnoses
 # !pip install unsloth vllm
 
 # Import necessary libraries
+import os
+# Disable HF transfer to fix download issues
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+
 from unsloth import FastLanguageModel
 import torch
 from datasets import Dataset

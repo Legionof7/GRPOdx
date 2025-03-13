@@ -4,6 +4,10 @@ Evaluation script for GRPODx Medical Diagnosis Agent.
 This script loads a trained model and runs evaluation on test scenarios.
 """
 
+import os
+# Disable HF transfer to fix download issues
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+
 from unsloth import FastLanguageModel
 from test_scenarios import evaluate_model, TEST_DISEASE_BANK
 import argparse
@@ -22,7 +26,7 @@ def main():
     max_seq_length = 4096  # Updated to match the new context window
     lora_rank = 8
     
-    # Load base model - using unsloth BNB 4-bit 70B model
+    # Load base model - using unsloth BNB 4-bit 70B model with HF transfer disabled
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name="unsloth/Llama-3.3-70B-Instruct-bnb-4bit",
         max_seq_length=max_seq_length,
