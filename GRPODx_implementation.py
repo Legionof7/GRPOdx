@@ -434,7 +434,7 @@ def extract_diagnosis(text):
 from llm_patient import llm_patient_response, create_llm_patient
 
 # Episode simulation
-def run_episode(model, tokenizer, disease_info=None, max_turns=20, use_llm_patient=False):
+def run_episode(model, tokenizer, disease_info=None, max_turns=20, use_llm_patient=False, use_verdict=False):
     """
     Run a complete diagnostic episode
     
@@ -444,6 +444,7 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=20, use_llm_patie
         disease_info: Optional disease info. If None, a new disease will be generated
         max_turns: Maximum number of conversation turns
         use_llm_patient: Whether to use the LLM-based patient simulator
+        use_verdict: Whether to use Verdict-based reward scoring (requires OpenAI API key)
         
     Returns:
         conversation, final_diagnosis, reward, disease_info
@@ -528,11 +529,194 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=20, use_llm_patie
             
         conversation.append({"role": "user", "content": patient_reply})
     
-    # Calculate reward
+    # Calculate reward using Verdict if enabled, otherwise use the original method
+    if use_verdict and final_diagnosis:
+        reward = calculate_verdict_reward(final_diagnosis, disease_info, conversation, num_turns=len(conversation) // 2)
+    else:
+        reward = calculate_traditional_reward(final_diagnosis, disease_info, questions_asked)
+    
+    return conversation, final_diagnosis, reward, disease_info
+
+def calculate_verdict_reward(diagnosis, disease_info, conversation, num_turns=0):
+    """
+    Calculate reward using Verdict-based scoring system
+    
+    Args:
+        diagnosis: The final diagnosis
+        disease_info: The actual disease information
+        conversation: The complete conversation history
+        num_turns: Number of turns taken
+        
+    Returns:
+        A reward score from 0 to 1
+    """
+    try:
+        # Check if verdict is installed and API keys are available
+        import importlib.util
+        verdict_spec = importlib.util.find_spec("verdict")
+        if verdict_spec is None:
+            print("Verdict not installed. To use Verdict-based rewards:")
+            print("1. Install with: pip install verdict")
+            print("2. Set your OpenAI API key as environment variable: OPENAI_API_KEY")
+            return calculate_traditional_reward(diagnosis, disease_info, [])
+            
+        # Check for API key in environment variables
+        import os
+        if not os.environ.get("OPENAI_API_KEY"):
+            print("WARNING: OpenAI API key not found in environment")
+            print("Please set your key: export OPENAI_API_KEY='your-api-key'")
+            print("Falling back to traditional reward calculation")
+            return calculate_traditional_reward(diagnosis, disease_info, [])
+            
+        # Import verdict modules
+        from verdict import Pipeline, Layer
+        from verdict.common.judge import CategoricalJudgeUnit
+        from verdict.scale import DiscreteScale
+        from verdict.transform import MaxPoolUnit
+        from verdict.schema import Schema
+        
+        # Disable rate limiting for local testing
+        from verdict.util import ratelimit
+        ratelimit.disable()
+        
+        # Use GPT-4o for better diagnostic evaluation and direct scoring
+        model_to_use = "gpt-4o"
+        print("Using GPT-4o for diagnostic scoring...")
+        
+        # Format the disease information as a document
+        disease_doc = f"Disease: {disease_info['disease_name']}\n"
+        disease_doc += "Symptoms:\n"
+        for symptom, has_symptom in disease_info['symptoms'].items():
+            if has_symptom:
+                disease_doc += f"- {symptom.replace('_', ' ')}: Present\n"
+            else:
+                disease_doc += f"- {symptom.replace('_', ' ')}: Not present\n"
+                
+        # Format the conversation and diagnosis as the claim
+        conv_summary = "Patient symptoms based on conversation:\n"
+        for msg in conversation:
+            if msg["role"] == "user":
+                patient_msg = msg["content"].strip()
+                if not patient_msg.startswith("I already answered") and "ask me something else" not in patient_msg:
+                    conv_summary += f"- {patient_msg}\n"
+                    
+        claim = f"{conv_summary}\nDiagnosis: {diagnosis}"
+        
+        # Create a judge that directly scores the diagnostic quality
+        from verdict.scale import IntervalScale
+        from verdict.common.judge import IntervalJudgeUnit
+        
+        diagnostic_judge = IntervalJudgeUnit(
+            name='DiagnosticScorer', 
+            scale=IntervalScale([0.0, 1.0]),
+            explanation=True
+        ).prompt("""
+            Evaluate the diagnostic quality of the provided diagnosis against the disease information.
+            Score the diagnosis on a scale from 0.0 to 1.0, where:
+            
+            - 1.0: Perfect diagnosis that exactly matches the correct disease
+            - 0.8-0.9: Very strong diagnosis that identifies the correct disease with minor imprecision
+            - 0.6-0.7: Good diagnosis that identifies a closely related condition
+            - 0.4-0.5: Partial diagnosis that identifies some aspects of the condition
+            - 0.2-0.3: Poor diagnosis with minimal connection to the correct disease
+            - 0.0-0.1: Completely incorrect diagnosis
+            
+            Disease Information: {source.doc}
+            Diagnostic Process and Conclusion: {source.claim}
+            
+            Consider:
+            1. Accuracy: How well does the diagnosis match the actual disease?
+            2. Completeness: Does the diagnosis capture all key aspects of the disease?
+            3. Specificity: Is the diagnosis appropriately specific (not too vague)?
+            4. Clinical Relevance: Would the diagnosis lead to appropriate management?
+            
+            Score:
+        """).via(policy_or_name=model_to_use, retries=1, temperature=0.2)
+        
+        # Create a pipeline with just the single scoring judge
+        pipeline = Pipeline() >> diagnostic_judge
+        
+        # Create the test sample
+        test_sample = Schema.of(doc=disease_doc, claim=claim)
+        
+        # Run the verdict pipeline
+        response, _ = pipeline.run(test_sample, max_workers=1)
+        
+        # Extract the numeric score (should be between 0.0 and 1.0)
+        score_key = list(filter(lambda k: '_score' in k or '_value' in k, response.keys()))[0]
+        try:
+            # Get the raw score from the judge
+            judge_score = float(response[score_key])
+            
+            # Ensure it's within valid range
+            base_reward = max(0.0, min(1.0, judge_score))
+            
+            # Round to 2 decimal places for clarity
+            base_reward = round(base_reward, 2)
+            
+            # Extract the explanation if available
+            explanation_key = list(filter(lambda k: '_explanation' in k, response.keys()))[0]
+            if explanation_key in response:
+                print(f"Verdict explanation: {response[explanation_key]}")
+        except (ValueError, TypeError):
+            # Fall back to a default method if score parsing fails
+            print("Failed to parse score from Verdict, using fallback scoring")
+            
+            # Find any 'yes'/'no' assessment that might exist
+            yes_no_key = list(filter(lambda k: '_choice' in k, response.keys()))
+            if yes_no_key and response[yes_no_key[0]] == 'yes':
+                base_reward = 0.85  # Default high score for 'yes'
+            else:
+                # Check for partial match based on word overlap
+                disease_words = set(disease_info["disease_name"].lower().split())
+                diagnosis_words = set(diagnosis.lower().split())
+                common_words = disease_words.intersection(diagnosis_words)
+                
+                if len(common_words) > 0 and len(common_words) >= len(disease_words) / 3:
+                    base_reward = 0.4  # Partial credit for related diagnosis
+                else:
+                    base_reward = 0.1  # Minimal credit
+        
+        # Add speed bonus for both correct and partially correct diagnoses
+        speed_bonus = 0.0
+        if base_reward > 0:
+            if num_turns <= 5:
+                speed_bonus = 0.25  # Maximum speed bonus
+            else:
+                max_efficient_turns = 15
+                if num_turns <= max_efficient_turns:
+                    speed_bonus = 0.25 * (1 - (num_turns - 5) / (max_efficient_turns - 5))
+        
+        final_reward = base_reward + speed_bonus
+        
+        # Always provide some minimal reward for making any diagnosis
+        if final_reward == 0.0 and diagnosis:
+            final_reward = 0.1
+        
+        return final_reward
+        
+    except Exception as e:
+        # Fall back to traditional reward calculation if verdict fails
+        print(f"Verdict reward calculation failed: {e}")
+        print("Falling back to traditional reward calculation.")
+        return calculate_traditional_reward(diagnosis, disease_info, [])
+
+def calculate_traditional_reward(final_diagnosis, disease_info, questions_asked):
+    """
+    Calculate reward using the traditional method (original implementation)
+    
+    Args:
+        final_diagnosis: The final diagnosis
+        disease_info: The actual disease information
+        questions_asked: List of questions asked during the episode
+        
+    Returns:
+        A reward score from 0 to 1
+    """
     reward = 0.0
     
     # Get the number of turns taken (length of conversation divided by 2)
-    num_turns = len(conversation) // 2
+    num_turns = len(questions_asked) + 1 if final_diagnosis else len(questions_asked)
     
     # Exact match reward
     if final_diagnosis:
@@ -591,10 +775,10 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=20, use_llm_patie
         repetition_penalty = 0.1 * (len(questions_asked) - len(unique_questions))
         reward = max(0, reward - repetition_penalty)
     
-    return conversation, final_diagnosis, reward, disease_info
+    return reward
 
 # Prepare dataset for GRPO
-def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scenario=6, verbose=True, use_llm_patient=False):
+def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scenario=6, verbose=True, use_llm_patient=False, use_verdict=False):
     """
     Generate a batch of training data for GRPO using dynamically generated diseases
     
@@ -647,7 +831,8 @@ def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scen
                 model, 
                 tokenizer, 
                 disease_scenario,
-                use_llm_patient=use_llm_patient
+                use_llm_patient=use_llm_patient,
+                use_verdict=use_verdict
             )
             
             if verbose:
@@ -703,7 +888,7 @@ def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scen
 from transformers.trainer_callback import TrainerCallback
 
 class TrainingCallback(TrainerCallback):
-    def __init__(self, model, tokenizer, print_frequency=10, use_llm_patient=False):
+    def __init__(self, model, tokenizer, print_frequency=10, use_llm_patient=False, use_verdict=False):
         self.model = model
         self.tokenizer = tokenizer
         self.print_frequency = print_frequency
@@ -711,6 +896,7 @@ class TrainingCallback(TrainerCallback):
         self.example_scenarios = []
         self.last_rewards = []
         self.use_llm_patient = use_llm_patient
+        self.use_verdict = use_verdict
     
     def on_init_end(self, args, state, control, **kwargs):
         """Called at the end of trainer initialization"""
@@ -754,7 +940,8 @@ class TrainingCallback(TrainerCallback):
                 try:
                     conversation, diagnosis, reward, _ = run_episode(
                         self.model, self.tokenizer, disease, max_turns=16,
-                        use_llm_patient=self.use_llm_patient
+                        use_llm_patient=self.use_llm_patient,
+                        use_verdict=self.use_verdict
                     )
                     
                     # Print the conversation
@@ -786,7 +973,7 @@ class TrainingCallback(TrainerCallback):
         return control
 
 # Main training function
-def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbose=True, use_llm_patient=False):
+def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbose=True, use_llm_patient=False, use_verdict=False):
     """
     Main training function for GRPODx
     
@@ -796,6 +983,7 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbos
         completions_per_scenario: Number of completions per disease for GRPO
         verbose: Whether to print detailed logs during training
         use_llm_patient: Whether to use the LLM-based patient simulator
+        use_verdict: Whether to use Verdict-based reward scoring (requires OpenAI API key)
     """
     # Load model parameters from config
     max_seq_length = MODEL_CONFIG["max_seq_length"]
@@ -870,7 +1058,8 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbos
         batch_size, 
         completions_per_scenario, 
         verbose=verbose,
-        use_llm_patient=use_llm_patient
+        use_llm_patient=use_llm_patient,
+        use_verdict=use_verdict
     )
     
     # Create custom reward function
@@ -1001,7 +1190,9 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbos
     
     # Create a callback for monitoring
     if verbose:
-        callback = TrainingCallback(model, tokenizer, print_frequency=20, use_llm_patient=use_llm_patient)
+        callback = TrainingCallback(model, tokenizer, print_frequency=20, 
+                                   use_llm_patient=use_llm_patient, 
+                                   use_verdict=use_verdict)
     else:
         callback = None
     
@@ -1184,8 +1375,26 @@ def interactive_diagnosis(model, tokenizer, simulation_mode=False):
 
 # Main execution
 if __name__ == "__main__":
-    # Train the model
-    model, tokenizer = train_grpodx(num_steps=500)
+    import argparse
+    parser = argparse.ArgumentParser(description='Train and run GRPODx')
+    parser.add_argument('--use-verdict', action='store_true', help='Use Verdict for reward scoring')
+    parser.add_argument('--steps', type=int, default=500, help='Number of training steps')
+    parser.add_argument('--interactive', action='store_true', help='Run interactive mode after training')
+    args = parser.parse_args()
     
-    # Run interactive session
-    interactive_diagnosis(model, tokenizer)
+    # Default to using Verdict (requires OPENAI_API_KEY environment variable)
+    args.use_verdict = True if os.environ.get("OPENAI_API_KEY") else False
+    
+    # Display Verdict information if enabled
+    if args.use_verdict:
+        print("\n=== Using Verdict with GPT-4o for reward scoring ===")
+        print("Using OPENAI_API_KEY from environment variables")
+        print("Using GPT-4o for accurate diagnostic scoring")
+        print("=================================================\n")
+    
+    # Train the model
+    model, tokenizer = train_grpodx(num_steps=args.steps, use_verdict=args.use_verdict)
+    
+    # Run interactive session if requested
+    if args.interactive:
+        interactive_diagnosis(model, tokenizer)

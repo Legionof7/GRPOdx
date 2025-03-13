@@ -6,7 +6,8 @@ This file contains test cases and evaluation functions for the medical diagnosis
 
 import random
 from GRPODx_implementation import (
-    format_conversation, extract_diagnosis, extract_question, DISEASE_EXAMPLES
+    format_conversation, extract_diagnosis, extract_question, DISEASE_EXAMPLES,
+    calculate_verdict_reward, calculate_traditional_reward
 )
 from disease_generator import (
     generate_random_disease, generate_disease_batch, generate_related_diseases
@@ -55,7 +56,7 @@ def simulate_patient_response(question, disease_info, conversation_history=None)
     # Use the enhanced patient response function
     return patient_response(question, disease_info, conversation_history)
 
-def run_test_episode(model, tokenizer, disease_info=None, max_turns=20, verbose=True):
+def run_test_episode(model, tokenizer, disease_info=None, max_turns=20, verbose=True, use_verdict=False):
     """
     Run a diagnostic test episode with the trained model
     
@@ -65,6 +66,7 @@ def run_test_episode(model, tokenizer, disease_info=None, max_turns=20, verbose=
         disease_info: Optional disease info dictionary. If None, a new disease will be generated
         max_turns: Maximum number of conversation turns
         verbose: Whether to print the conversation
+        use_verdict: Whether to use Verdict-based reward scoring
         
     Returns:
         Dictionary with evaluation results
@@ -146,18 +148,34 @@ def run_test_episode(model, tokenizer, disease_info=None, max_turns=20, verbose=
     efficiency_score = 0
     symptom_coverage = 0
     
-    # Accuracy score
-    if final_diagnosis:
-        if final_diagnosis.lower() == disease_info["disease_name"].lower():
-            accuracy = 1.0
-        else:
-            # Partial match - word overlap
-            disease_words = set(disease_info["disease_name"].lower().split())
-            diagnosis_words = set(final_diagnosis.lower().split())
-            common_words = disease_words.intersection(diagnosis_words)
-            
-            if len(common_words) > 0 and len(common_words) >= len(disease_words) / 3:
-                accuracy = 0.3  # Partial credit for related diagnosis
+    # Use verdict-based or traditional scoring for accuracy
+    if use_verdict and final_diagnosis:
+        # Display using verdict if enabled
+        if verbose:
+            print("\nUsing Verdict with GPT-4o for scoring...")
+        
+        # Get verdict score from GPT-4o
+        verdict_score = calculate_verdict_reward(final_diagnosis, disease_info, conversation, num_turns=turn+1)
+        
+        # Map verdict score range (typically 0.0-1.0) to accuracy
+        # A higher verdict score should represent a better diagnosis
+        accuracy = verdict_score * 0.8  # Scale to be comparable with traditional accuracy
+        
+        if verbose:
+            print(f"Verdict score: {verdict_score:.2f}")
+    else:
+        # Traditional accuracy scoring
+        if final_diagnosis:
+            if final_diagnosis.lower() == disease_info["disease_name"].lower():
+                accuracy = 1.0
+            else:
+                # Partial match - word overlap
+                disease_words = set(disease_info["disease_name"].lower().split())
+                diagnosis_words = set(final_diagnosis.lower().split())
+                common_words = disease_words.intersection(diagnosis_words)
+                
+                if len(common_words) > 0 and len(common_words) >= len(disease_words) / 3:
+                    accuracy = 0.3  # Partial credit for related diagnosis
     
     # Repetition penalty
     unique_questions = set([q.lower() for q in questions_asked])
@@ -200,7 +218,7 @@ def run_test_episode(model, tokenizer, disease_info=None, max_turns=20, verbose=
     
     return result
 
-def evaluate_model(model, tokenizer, test_cases=None, num_cases=5):
+def evaluate_model(model, tokenizer, test_cases=None, num_cases=5, use_verdict=False):
     """
     Evaluate the model on multiple test cases
     
@@ -209,6 +227,7 @@ def evaluate_model(model, tokenizer, test_cases=None, num_cases=5):
         tokenizer: Tokenizer
         test_cases: Optional list of disease cases to test. If None, diseases will be generated
         num_cases: Number of test cases if generating new ones
+        use_verdict: Whether to use Verdict-based reward scoring with GPT-4o
         
     Returns:
         Dictionary with evaluation results
@@ -233,13 +252,14 @@ def evaluate_model(model, tokenizer, test_cases=None, num_cases=5):
     total_symptom_coverage = 0
     
     print("===== GRPODx Model Evaluation =====")
-    print(f"Running {len(test_cases)} test cases...\n")
+    print(f"Running {len(test_cases)} test cases...")
+    print(f"Reward system: {'Verdict with GPT-4o' if use_verdict else 'Traditional scoring'}\n")
     
     for i, disease_info in enumerate(test_cases):
         print(f"\n\n===== Test Case {i+1}: {disease_info['disease_name']} =====")
         print(f"Positive Symptoms: {', '.join([s.replace('_', ' ') for s, has in disease_info['symptoms'].items() if has])}")
         
-        result = run_test_episode(model, tokenizer, disease_info)
+        result = run_test_episode(model, tokenizer, disease_info, use_verdict=use_verdict)
         results.append(result)
         
         total_accuracy += result["accuracy"]

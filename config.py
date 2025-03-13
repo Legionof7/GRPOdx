@@ -8,7 +8,8 @@ This file contains configuration parameters that can be modified to customize th
 MODEL_CONFIG = {
     # Base model to use - will attempt these models in order until one works
     "model_options": [
-        "unsloth/Llama-3.3-70B-Instruct-bnb-4bit", # Primary 70B model (BNB 4-bit format)
+        "unsloth/gemma-3-27b-it-GGUF",            # Primary model - Gemma 3 27B (GGUF format)
+        "unsloth/Llama-3.3-70B-Instruct-bnb-4bit", # Alternative 70B model (BNB 4-bit format)
         "meta-llama/meta-Llama-3.1-8B-Instruct",   # Fallback - Llama 3.1 8B
         "unsloth/Llama-3.1-8B-Instruct",           # Unsloth mirror
         "unsloth/llama-3-8b-instruct",             # Alternative naming
@@ -19,13 +20,13 @@ MODEL_CONFIG = {
     ],
     
     # Legacy model name for backwards compatibility
-    "model_name": "unsloth/Llama-3.3-70B-Instruct-bnb-4bit",
+    "model_name": "unsloth/gemma-3-27b-it-GGUF",
     
     # Model parameters
     "max_seq_length": 8192,  # Doubled from 4096 to allow much longer conversations
-    "load_in_4bit": True,  # Set to False for 16-bit training (higher VRAM usage)
+    "load_in_4bit": False,  # Using GGUF format instead of 4-bit quantization
     "fast_inference": True,
-    "gpu_memory_utilization": 0.85,  # Adjusted for 70B model
+    "gpu_memory_utilization": 0.90,  # Adjusted for 27B model
     "rope_scaling": {"type": "dynamic", "factor": 4.0},  # Doubled factor for expanded context window
     
     # LoRA parameters
