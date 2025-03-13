@@ -37,9 +37,9 @@ LOAD_IN_4BIT = True  # 4-bit quantization to fit in limited VRAM
 
 # Training settings
 MAX_STEPS = 300  # Number of training steps
-BATCH_SIZE = 8  # Batch size per device (must be divisible by NUM_GENERATIONS)
+BATCH_SIZE = 4  # Batch size per device (must be divisible by NUM_GENERATIONS)
 GRAD_ACCUMULATION = 4  # Gradient accumulation steps
-NUM_GENERATIONS = 8  # Number of completions per scenario for GRPO
+NUM_GENERATIONS = 4  # Number of completions per scenario for GRPO
 
 # Paths
 OUTPUT_DIR = "outputs"
@@ -978,6 +978,9 @@ class OnlineGRPOTrainer:
             max_grad_norm=0.1,
             report_to="none",
             output_dir=self.output_dir,
+            torch_compile=False,  # Disable torch.compile to avoid tensor dimension issues
+            bf16=True,  # Use bf16 precision
+            torch_fsdp=[],  # Disable FSDP
         )
         
         # Track progress
@@ -1227,6 +1230,7 @@ def main():
         fast_inference=True,  # Enable vLLM fast inference
         max_lora_rank=LORA_RANK,
         gpu_memory_utilization=0.6,  # Adjust based on available VRAM
+        attn_implementation="eager",  # Use eager implementation for Gemma as recommended
     )
 
     if args.train:
@@ -1276,6 +1280,9 @@ def main():
                 max_grad_norm=0.1,
                 report_to="none",
                 output_dir=OUTPUT_DIR,
+                torch_compile=False,  # Disable torch.compile to avoid tensor dimension issues
+                bf16=True,  # Use bf16 precision
+                torch_fsdp=[],  # Disable FSDP
             )
 
             # Create GRPO trainer
