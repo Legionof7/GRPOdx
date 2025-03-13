@@ -301,7 +301,8 @@ def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scen
                 "prompt": prompt,
                 "completion": conversation[-1]["content"],
                 "reward": reward,
-                "disease_name": disease_scenario["disease_name"]
+                "disease_name": disease_scenario["disease_name"],
+                "disease_scenario": disease_scenario  # Pass full disease info
             })
         
         # Calculate group relative advantage
@@ -309,6 +310,11 @@ def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scen
         
         for item in episode_data:
             item["advantage"] = item["reward"] - avg_reward
+            # Include reward function metadata to be used by the diagnosis_reward_func
+            item["reward_meta"] = {
+                "disease_name": item["disease_name"],
+                "disease_cache": disease_cache
+            }
             training_data.append(item)
     
     return Dataset.from_list(training_data)
@@ -320,15 +326,38 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6):
     max_seq_length = 2048
     lora_rank = 8
     
-    # Load model
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="meta-llama/meta-Llama-3.1-8B-Instruct",
-        max_seq_length=max_seq_length,
-        load_in_4bit=True,
-        fast_inference=True,
-        max_lora_rank=lora_rank,
-        gpu_memory_utilization=0.6,
-    )
+    # Create a global disease cache that can be shared with reward functions
+    disease_cache = []
+    
+    # Load model with fallbacks for different environments
+    model_options = [
+        "meta-llama/meta-Llama-3.1-8B-Instruct",  # First choice
+        "unsloth/Llama-3.1-8B-Instruct",          # Unsloth mirror
+        "unsloth/llama-3-8b-instruct",            # Alternative naming
+        "unsloth/Qwen2.5-7B-Instruct",            # Alternative model
+        "meta-llama/Llama-2-7b-chat-hf",          # Llama 2 fallback
+        "unsloth/Qwen2.5-1.5B-Instruct"           # Smallest model option
+    ]
+    
+    # Try models in order until one works
+    for model_name in model_options:
+        try:
+            print(f"Attempting to load model: {model_name}")
+            model, tokenizer = FastLanguageModel.from_pretrained(
+                model_name=model_name,
+                max_seq_length=max_seq_length,
+                load_in_4bit=True,
+                fast_inference=True,
+                max_lora_rank=lora_rank,
+                gpu_memory_utilization=0.6,
+            )
+            print(f"Successfully loaded: {model_name}")
+            break
+        except Exception as e:
+            print(f"Failed to load {model_name}: {str(e)}")
+            continue
+    else:
+        raise ValueError("Could not load any of the available models. Please check your environment.")
     
     model = FastLanguageModel.get_peft_model(
         model,
@@ -370,20 +399,42 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6):
     def diagnosis_reward_func(prompts, completions, **kwargs):
         """Custom reward function for GRPODx"""
         rewards = []
+        
         for completion in completions:
-            response = completion[0]["content"]
+            # Handle different completion formats - could be a string or a dict
+            if isinstance(completion, list) and len(completion) > 0:
+                if isinstance(completion[0], dict) and "content" in completion[0]:
+                    response = completion[0]["content"]
+                else:
+                    response = str(completion[0])
+            elif isinstance(completion, dict) and "content" in completion:
+                response = completion["content"]
+            else:
+                response = str(completion)
+            
+            # Get diagnosis from response
             diagnosis = extract_diagnosis(extract_question(response))
             
             # Basic reward - can be expanded with partial matching etc.
             reward = 0.0
             if diagnosis:
-                # Check against the disease in the prompt
-                # This is a simplified version - in reality we'd need to extract
-                # the disease info from the conversation
-                for disease in DISEASE_BANK:
-                    if disease["disease_name"].lower() in diagnosis.lower():
+                # Generate a new disease for checking (since we're using dynamic generation)
+                # This rewards general diagnostic format rather than specific disease names
+                reward = 0.5  # Base reward for providing any diagnosis
+                
+                # Check for disease names in our cache if available
+                disease_cache = kwargs.get('disease_cache', [])
+                if disease_cache:
+                    for disease in disease_cache:
+                        disease_name = disease.get('disease_name', '').lower()
+                        if disease_name and disease_name in diagnosis.lower():
+                            reward = 1.0
+                            break
+                
+                # Check for disease name in the dataset
+                if 'disease_name' in kwargs:
+                    if kwargs['disease_name'].lower() in diagnosis.lower():
                         reward = 1.0
-                        break
             
             rewards.append(reward)
         
@@ -399,6 +450,7 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6):
         reward_funcs=[diagnosis_reward_func],
         args=training_args,
         train_dataset=initial_dataset,
+        reward_kwargs={"disease_cache": disease_cache},  # Pass reward metadata
     )
     
     # Train the model

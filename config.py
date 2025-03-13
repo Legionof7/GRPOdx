@@ -6,13 +6,18 @@ This file contains configuration parameters that can be modified to customize th
 
 # Model Configuration
 MODEL_CONFIG = {
-    # Base model to use
-    "model_name": "meta-llama/meta-Llama-3.1-8B-Instruct",
+    # Base model to use - will attempt these models in order until one works
+    "model_options": [
+        "meta-llama/meta-Llama-3.1-8B-Instruct",  # First choice
+        "unsloth/Llama-3.1-8B-Instruct",          # Unsloth mirror
+        "unsloth/llama-3-8b-instruct",            # Alternative naming
+        "unsloth/Qwen2.5-7B-Instruct",            # Alternative model
+        "meta-llama/Llama-2-7b-chat-hf",          # Llama 2 fallback
+        "unsloth/Qwen2.5-1.5B-Instruct"           # Smallest model option
+    ],
     
-    # Alternative models that can be used:
-    # "unsloth/Llama-3.1-8B-Instruct" - Unsloth optimized version
-    # "meta-llama/Llama-2-7b-chat-hf" - For Llama 2
-    # "unsloth/qwen2.5-1.5b-chat" - Smaller model for limited VRAM (1.5B params)
+    # Legacy model name for backwards compatibility
+    "model_name": "meta-llama/meta-Llama-3.1-8B-Instruct",
     
     # Model parameters
     "max_seq_length": 2048,
