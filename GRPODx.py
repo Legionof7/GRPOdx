@@ -27,31 +27,32 @@ from trl import GRPOConfig, GRPOTrainer
 from transformers import Trainer, TrainingArguments, DataCollatorForLanguageModeling
 from vllm import SamplingParams
 
-# Allow for direct supervised finetuning as fallback
-try:
-    from grpo_gemma_patch import patch_grpo_for_gemma, ensure_eager_attention
-    # Apply the patch to fix Gemma matrix dimension issues in GRPO
-    patch_grpo_for_gemma()
-    print("Applied GRPO Gemma-specific patches")
-except ImportError:
-    print("GRPO Gemma patch not found - you may encounter tensor dimension errors")
-    ensure_eager_attention = lambda x: x  # No-op function
+# Standard environment setup for GRPO with Phi-4
+import os
+# No need for special Gemma-specific settings with Phi-4
+
+print("Using standard configuration for Phi-4 with GRPO")
+
+# Simple function for model name handling
+def ensure_eager_attention(model_name):
+    """Pass-through function for model name."""
+    return model_name
 
 # ======================================================================
 # Configuration
 # ======================================================================
 
-# Model settings
-MAX_SEQ_LENGTH = 1024  # Reduced context window for better compatibility
-LORA_RANK = 8  # Reduced LoRA rank for lighter matrix operations
-MODEL_NAME = "unsloth/gemma-3-1b-it-bnb-4bit"  # Base model
+# Model settings - using Phi-4 which has better GRPO compatibility
+MAX_SEQ_LENGTH = 512  # Context window size
+LORA_RANK = 16  # Standard LoRA rank for Phi-4 as in the example
+MODEL_NAME = "unsloth/Phi-4"  # Phi-4 model (more compatible with GRPO)
 LOAD_IN_4BIT = True  # 4-bit quantization to fit in limited VRAM
 
-# Training settings - reduced for Gemma compatibility
+# Training settings - standard GRPO settings for Phi-4
 MAX_STEPS = 300  # Number of training steps
-BATCH_SIZE = 1  # Batch size per device (following notebook)
+BATCH_SIZE = 1  # Batch size per device
 GRAD_ACCUMULATION = 1  # Gradient accumulation steps
-NUM_GENERATIONS = 4  # Reduced generation count for smaller tensors
+NUM_GENERATIONS = 6  # Number of completions per scenario for GRPO
 
 # Paths
 OUTPUT_DIR = "outputs"
@@ -970,8 +971,8 @@ class OnlineGRPOTrainer:
             self.batch_size = self.num_generations
             print(f"Setting batch_size to {self.batch_size}")
         
-        # Gemma-optimized GRPO configuration
-        max_prompt_length = 128  # Even shorter prompt length for Gemma compatibility
+        # Phi-4 GRPO configuration from example
+        max_prompt_length = 256  # Standard prompt length for GRPO
         
         self.training_args = GRPOConfig(
             learning_rate=5e-6,
@@ -992,8 +993,6 @@ class OnlineGRPOTrainer:
             max_grad_norm=0.1,
             report_to="none",
             output_dir=self.output_dir,
-            fp16=False,  # Avoid mixed precision to reduce complexity
-            bf16=False,
         )
         
         # Track progress
@@ -1256,17 +1255,13 @@ def main():
             model,
             r=LORA_RANK,
             target_modules=[
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "o_proj",
-                "gate_proj",
-                "up_proj",
+                "gate_proj", 
+                "up_proj", 
                 "down_proj",
-            ],
+            ],  # Phi-4 recommended modules
             lora_alpha=LORA_RANK,
             use_gradient_checkpointing="unsloth",  # Enable for long context
-            random_state=42,
+            random_state=3407,  # Same as in Phi-4 example
         )
 
         if args.offline:
@@ -1277,8 +1272,8 @@ def main():
             
             # Configure GRPO training
             print("Configuring GRPO trainer...")
-            # Gemma-optimized GRPO configuration for batch training
-            max_prompt_length = 128  # Even shorter prompt length for Gemma compatibility
+            # Phi-4 GRPO configuration from example
+            max_prompt_length = 256  # Standard prompt length for GRPO
             
             training_args = GRPOConfig(
                 learning_rate=5e-6,
@@ -1299,8 +1294,6 @@ def main():
                 max_grad_norm=0.1,
                 report_to="none",
                 output_dir=OUTPUT_DIR,
-                fp16=False,  # Avoid mixed precision to reduce complexity
-                bf16=False,
             )
 
             # Create GRPO trainer
