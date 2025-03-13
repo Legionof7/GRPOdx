@@ -264,13 +264,38 @@ def extract_diagnosis_tag(text):
         match = re.search(diagnosis_tag_pattern, text, re.DOTALL)
         if match:
             diagnosis_content = match.group(1).strip()
+            
             # Now extract the "Final diagnosis: X" from within the tags
             final_pattern = r"Final diagnosis: ([A-Za-z\s\-\.,']+)"
             final_match = re.search(final_pattern, diagnosis_content)
+            
             if final_match:
-                return final_match.group(1).strip()
-            # If no "Final diagnosis:" format found, return the whole content
+                diagnosis = final_match.group(1).strip()
+                # Basic check to filter out clearly non-diagnostic text
+                if ("question" in diagnosis.lower() or 
+                    "symptom" in diagnosis.lower() or 
+                    "next" in diagnosis.lower() or
+                    "explore" in diagnosis.lower() or
+                    "affecting" in diagnosis.lower() or
+                    "towards conditions" in diagnosis.lower()):
+                    print(f"Warning: Rejected non-diagnostic text in diagnosis tag: '{diagnosis}'")
+                    return None
+                return diagnosis
+                
+            # If no "Final diagnosis:" format found, use the whole content as a fallback
+            # But first check if it's likely to be diagnostic text
+            if ("question" in diagnosis_content.lower() or 
+                "symptom" in diagnosis_content.lower() or 
+                "next" in diagnosis_content.lower() or
+                "explore" in diagnosis_content.lower() or
+                "affecting" in diagnosis_content.lower() or
+                "towards conditions" in diagnosis_content.lower()):
+                print(f"Warning: Rejected non-diagnostic text in diagnosis tag: '{diagnosis_content}'")
+                return None
+                
+            # Return the whole content if we can't extract using the pattern
             return diagnosis_content.strip()
+            
     except Exception as e:
         print(f"Warning: Error extracting diagnosis from tags: {e}")
     
