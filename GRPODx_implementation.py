@@ -18,6 +18,7 @@ import json
 import re
 from trl import GRPOConfig, GRPOTrainer
 from vllm import SamplingParams
+from config import MODEL_CONFIG, TRAINING_CONFIG, SYSTEM_PROMPT
 
 # Import disease generator for dynamic disease creation
 from disease_generator import generate_random_disease, generate_disease_batch, generate_related_diseases
@@ -83,23 +84,7 @@ def get_disease(cache=None, use_cache_probability=0.2):
     # Otherwise generate a new disease
     return generate_random_disease()
 
-# Define prompt formats
-SYSTEM_PROMPT = """
-You are a medical diagnostic assistant. Your goal is to diagnose the patient's condition by asking relevant questions.
-Follow these rules:
-1. Ask one question at a time about symptoms.
-2. Don't repeat questions you've already asked.
-3. When you have enough information, provide your final diagnosis in the format "Final diagnosis: [DISEASE]".
-4. Be concise and professional.
-
-Format your response as:
-<reasoning>
-Your internal reasoning about the patient's condition based on symptoms revealed so far.
-</reasoning>
-<question>
-Your next question to the patient OR your final diagnosis.
-</question>
-"""
+# Use SYSTEM_PROMPT imported from config.py
 
 def format_conversation(conversation_history, turn_number=None):
     """Format conversation history for model input"""
@@ -649,22 +634,15 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbos
         verbose: Whether to print detailed logs during training
         use_llm_patient: Whether to use the LLM-based patient simulator
     """
-    # Set up model parameters
-    max_seq_length = 4096  # Increased from 2048 to allow longer conversations
-    lora_rank = 8
+    # Load model parameters from config
+    max_seq_length = MODEL_CONFIG["max_seq_length"]
+    lora_rank = MODEL_CONFIG.get("lora_rank", 8)
     
     # Create a global disease cache that can be shared with reward functions
     disease_cache = []
     
-    # Load model with fallbacks for different environments
-    model_options = [
-        "meta-llama/meta-Llama-3.1-8B-Instruct",  # First choice
-        "unsloth/Llama-3.1-8B-Instruct",          # Unsloth mirror
-        "unsloth/llama-3-8b-instruct",            # Alternative naming
-        "unsloth/Qwen2.5-7B-Instruct",            # Alternative model
-        "meta-llama/Llama-2-7b-chat-hf",          # Llama 2 fallback
-        "unsloth/Qwen2.5-1.5B-Instruct"           # Smallest model option
-    ]
+    # Load model with fallbacks from config
+    model_options = MODEL_CONFIG["model_options"]
     
     # Try models in order until one works
     for model_name in model_options:
@@ -673,10 +651,10 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbos
             model, tokenizer = FastLanguageModel.from_pretrained(
                 model_name=model_name,
                 max_seq_length=max_seq_length,
-                load_in_4bit=True,
-                fast_inference=True,
+                load_in_4bit=MODEL_CONFIG.get("load_in_4bit", True),
+                fast_inference=MODEL_CONFIG.get("fast_inference", True),
                 max_lora_rank=lora_rank,
-                gpu_memory_utilization=0.9,  # Increased for 70B model
+                gpu_memory_utilization=MODEL_CONFIG.get("gpu_memory_utilization", 0.9),
             )
             print(f"Successfully loaded: {model_name}")
             break
@@ -699,27 +677,27 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbos
     )
     
     # Prepare GRPO configuration
-    max_prompt_length = 1024  # Increased from 512 to allow more context in prompts
+    max_prompt_length = TRAINING_CONFIG.get("max_prompt_length", 1024)
     
     training_args = GRPOConfig(
-        learning_rate=5e-6,
-        adam_beta1=0.9,
-        adam_beta2=0.99,
-        weight_decay=0.1,
-        warmup_ratio=0.1,
-        lr_scheduler_type="cosine",
-        optim="paged_adamw_8bit",
-        logging_steps=1,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=1,
+        learning_rate=TRAINING_CONFIG.get("learning_rate", 2e-6),
+        adam_beta1=TRAINING_CONFIG.get("adam_beta1", 0.9),
+        adam_beta2=TRAINING_CONFIG.get("adam_beta2", 0.99),
+        weight_decay=TRAINING_CONFIG.get("weight_decay", 0.1),
+        warmup_ratio=TRAINING_CONFIG.get("warmup_ratio", 0.1),
+        lr_scheduler_type=TRAINING_CONFIG.get("lr_scheduler_type", "cosine"),
+        optim=TRAINING_CONFIG.get("optim", "paged_adamw_8bit"),
+        logging_steps=TRAINING_CONFIG.get("logging_steps", 1),
+        per_device_train_batch_size=TRAINING_CONFIG.get("per_device_train_batch_size", 1),
+        gradient_accumulation_steps=TRAINING_CONFIG.get("gradient_accumulation_steps", 2),
         num_generations=completions_per_scenario,
         max_prompt_length=max_prompt_length,
         max_completion_length=max_seq_length - max_prompt_length,
         max_steps=num_steps,
         save_steps=num_steps // 5,
-        max_grad_norm=0.1,
+        max_grad_norm=TRAINING_CONFIG.get("max_grad_norm", 0.1),
         report_to="none",
-        output_dir="outputs",
+        output_dir=TRAINING_CONFIG.get("output_dir", "outputs"),
     )
     
     # Generate initial training dataset
