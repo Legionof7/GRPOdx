@@ -55,7 +55,7 @@ def simulate_patient_response(question, disease_info, conversation_history=None)
     # Use the enhanced patient response function
     return patient_response(question, disease_info, conversation_history)
 
-def run_test_episode(model, tokenizer, disease_info=None, max_turns=8, verbose=True):
+def run_test_episode(model, tokenizer, disease_info=None, max_turns=10, verbose=True):
     """
     Run a diagnostic test episode with the trained model
     
@@ -92,21 +92,21 @@ def run_test_episode(model, tokenizer, disease_info=None, max_turns=8, verbose=T
     
     # Diagnostic conversation loop
     for turn in range(max_turns):
-        # Format conversation for model input
-        formatted_conv = format_conversation(conversation)
+        # Format conversation for model input with turn number
+        current_turn = turn + 1
+        formatted_conv = format_conversation(conversation, turn_number=current_turn) 
         prompt = tokenizer.apply_chat_template(formatted_conv, tokenize=False, add_generation_prompt=True)
         
         # Generate doctor's response
         sampling_params = SamplingParams(
             temperature=0.7,
             top_p=0.95,
-            max_tokens=512,
+            max_tokens=768,  # Increased from 512 to match config
         )
         
         response = model.fast_generate(
             [prompt],
             sampling_params=sampling_params,
-            lora_request=model.load_lora("grpodx_model"),
         )[0].outputs[0].text
         
         # Extract parts

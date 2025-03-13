@@ -19,7 +19,8 @@ def main():
     print("Loading GRPODx Medical Diagnosis Agent...")
     
     # Load model parameters (matching training parameters)
-    max_seq_length = 2048
+    max_seq_length = 4096  # Updated to match the new context window
+    lora_rank = 8
     
     # Load base model
     model, tokenizer = FastLanguageModel.from_pretrained(
@@ -27,7 +28,26 @@ def main():
         max_seq_length=max_seq_length,
         load_in_4bit=True,
         fast_inference=True,
+        max_lora_rank=lora_rank,
     )
+    
+    # Load LoRA weights
+    print("Loading LoRA weights from grpodx_model...")
+    try:
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=lora_rank,
+            target_modules=[
+                "q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj",
+            ],
+            lora_alpha=lora_rank,
+        )
+        model.load_adapter("grpodx_model", adapter_name="default")
+        print("Successfully loaded LoRA weights")
+    except Exception as e:
+        print(f"Warning: Failed to load LoRA weights: {e}")
+        print("Continuing with base model only")
     
     # Run evaluation
     if args.test_all:
