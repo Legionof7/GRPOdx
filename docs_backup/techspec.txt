@@ -1,0 +1,215 @@
+1. Overview
+We aim to build an autonomous diagnostic agent that:
+
+Interacts with a synthetic patient in a multi-turn dialogue.
+Dynamically asks relevant questions.
+Proposes a final diagnosis.
+In this specification, we combine:
+
+The AMIE paper’s concepts (self-play loops, iterative improvement),
+Unsloth’s GRPO framework, which supports low-VRAM reinforcement learning.
+The resulting model should:
+
+Autonomously conduct a diagnostic conversation (multi-turn),
+Use reinforcement learning (specifically GRPO) to reward correct diagnoses,
+Train on limited VRAM (e.g., 7–8GB) in 4-bit or 8-bit quantization,
+Produce a final model that runs interactively (multi-turn inference) with real user inputs.
+2. Key Components
+2.1 Base Model
+Architecture: Llama (7B or 1.5B Qwen2.5) or similar ~ up to 7B parameters to fit in ~7GB VRAM, using QLoRA or LoRA.
+Context Window: ~2k–4k tokens (or more if VRAM allows).
+Instruction-tuned: We can start with an “Instruct” version so it already knows how to handle instructions politely.
+2.2 Self-Play Environment
+We create two “agents”:
+
+Doctor agent (the policy we’re training):
+
+Receives the conversation so far,
+Outputs a question or a final diagnosis.
+Patient agent (scripted or LLM-based with “ground truth” disease):
+
+Has a hidden “disease label.”
+Knows what symptoms are relevant.
+Answers the doctor’s questions truthfully (yes/no/nonspecific), based on the ground-truth disease’s canonical symptoms.
+Goal: The doctor agent must collect enough information from the patient agent to reach the correct diagnosis. The patient agent’s role is to respond consistently with the known disease.
+
+2.3 AMIE-like Self-play Loops
+We adapt the idea from AMIE’s “outer loop” and “inner loop”:
+
+Inner loop: The model (doctor) interacts with the patient agent, possibly gets an iterative in-context critique or reward after the conversation.
+Outer loop: We feed new conversation data back into the policy. Over multiple iterations, we refine the model using new self-play transcripts.
+For each disease scenario:
+
+Generate N conversation “episodes” from the same scenario (N=2..8).
+Each conversation ends with the doctor’s final guess.
+Reward = +1 if correct, 0 if incorrect (or partial credit if relevant).
+The group relative step in GRPO sets the advantage = (reward - group_mean_reward) for each episode, updating the model accordingly.
+3. Data & Disease Scenarios
+We store a set of disease definitions, each with:
+
+python
+Copy
+Edit
+{
+  "disease_name": "Influenza",
+  "symptoms": {
+    "fever": true,
+    "cough": true,
+    "headache": true,
+    "sore_throat": true,
+    ...
+  },
+  # Possibly additional data: typical onset, severity, confounders, etc.
+}
+We randomly sample from this “disease bank” for each training episode.
+
+Key points:
+
+Each disease scenario references a “ground-truth disease.”
+The patient’s answers reflect the disease’s symptom dictionary.
+4. Training Pipeline with Unsloth GRPO
+4.1 Model Loading
+python
+Copy
+Edit
+from unsloth import FastLanguageModel
+model, tokenizer = FastLanguageModel.from_pretrained(
+   "unsloth/llama-3.1-7b",
+   load_in_4bit=True,
+   max_seq_length=2048
+)
+Load in 4-bit for lower VRAM usage.
+Possibly set dtype=None or torch.float16 depending on GPU.
+4.2 LoRA/QLoRA Setup
+python
+Copy
+Edit
+from unsloth import FastLanguageModel
+model = FastLanguageModel.get_peft_model(
+    model,
+    r=8, 
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj"],
+    lora_alpha=16,
+    lora_dropout=0,
+    bias="none",
+    use_gradient_checkpointing="unsloth"
+)
+Minimal memory overhead.
+4.3 Self-Play Generation
+Pseudo-code for a single batch:
+
+python
+Copy
+Edit
+def run_episode(model, disease_info):
+    conversation = []
+    # up to 5 doc turns, or until doc outputs "Final diagnosis: ..."
+    # compute final reward based on correctness
+    ...
+    return conversation, final_diagnosis, reward
+Batching:
+
+For each sample, generate multiple completions (N≥2).
+Compute each completion’s raw reward (1 if final diagnosis matches ground-truth, else 0).
+advantage = raw_reward - mean_reward (Group Relative).
+4.4 GRPO Trainer
+python
+Copy
+Edit
+from unsloth import GRPOConfig, GRPOTrainer
+
+grpo_config = GRPOConfig(
+   epochs=1, # or steps, etc.
+   # other hyperparams...
+)
+
+grpo_trainer = GRPOTrainer(
+   model=model,
+   config=grpo_config,
+   tokenizer=tokenizer,
+   reward_func=None # We'll supply rewards manually
+)
+Main Loop:
+
+python
+Copy
+Edit
+for step in range(NUM_STEPS):
+    # Sample disease + do multiple completions
+    data_batch = []
+    for _ in range(batch_size):
+        scenario = random.choice(disease_bank)
+        completions = []
+        for i in range(num_completions_per_scenario):
+            conv, guess, raw_r = run_episode(model, scenario)
+            completions.append((conv, guess, raw_r))
+        # compute adv
+        avg_r = sum(x[2] for x in completions)/len(completions)
+        for conv, guess, rr in completions:
+            adv = rr - avg_r
+            data_batch.append((conv, adv))
+    # Train
+    grpo_trainer.train_on_records(data_batch)
+5. Reward Design
+Correctness: +1 if final guess == ground truth. 0 otherwise.
+Optional:
+Penalty for repeating the same question.
+Reward partial overlap if guess is “close” to ground-truth disease.
+Implementation: The simplest approach is a Python function that compares final guess to disease_info["disease_name"].
+
+6. AMIE-style Critic / Self-improvement (Optional)
+To replicate AMIE’s approach more closely:
+
+Add a critic (mini-LLM) that reviews the doc’s conversation.
+Provide textual feedback for each step: “You asked the same question repeatedly,” “You forgot to ask about X.”
+The doc then refines its output.
+This second iteration is what you feed into the training loop.
+This second step can be integrated into the code by re-running the doc after each “critic feedback.”
+
+7. Deployment & Inference
+Once training converges, we save the LoRA checkpoint:
+
+python
+Copy
+Edit
+model.save_pretrained("my-dx-lora")
+Then at inference time (with a real user):
+
+User describes initial symptoms.
+The doc agent starts asking questions.
+The user replies.
+The doc agent eventually outputs “Final diagnosis.”
+We’ll do repeated calls to model.fast_generate() with updated conversation context each turn.
+
+Live Chat example:
+
+python
+Copy
+Edit
+conversation = []
+while True:
+    doc_prompt = format_prompt(conversation)
+    doc_response = model.fast_generate([doc_prompt])[0]
+    conversation.append({"role": "doctor", "content": doc_response})
+    
+    if "Final diagnosis:" in doc_response:
+        break
+    
+    user_answer = input("User: ")
+    conversation.append({"role": "patient", "content": user_answer})
+8. VRAM & Resource Notes
+Model size: 1.5B–7B recommended for a single ~8–12GB GPU in 4-bit QLoRA.
+Longer context: If we want 4k or 8k token context, check VRAM usage.
+Steps: Typically 1–3k steps may suffice for a small demonstration. If coverage is broad (many diseases), you may train longer.
+9. Summary of Steps
+Install & load Unsloth with the chosen LLM in 4-bit.
+Build a self-play environment:
+Each disease scenario is ground truth for the patient agent,
+The doc agent is the trainable model.
+Implement multi-turn episodes → doc’s final guess → reward.
+Use GRPO in Unsloth to handle group-based advantage calculations.
+Train for N steps or epochs.
+Evaluate the doc agent’s accuracy on withheld diseases.
+Deploy interactive inference code.
+This ensures we replicate AMIE’s self-play concept (simulated dialogues, iterative improvement) but rely on Unsloth to do low-VRAM RL (GRPO). The final deliverable is a multi-turn reasoning model that can diagnose conditions from question-answer dialogues.
