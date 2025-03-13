@@ -311,6 +311,7 @@ def run_episode(
     disease_info: Dict,
     max_turns: int = 3,  # Further reduced to prevent CUDA OOM errors
     use_gpt_patient: bool = True,
+    verbose: bool = True,  # Added verbose logging option
 ) -> Tuple[List[Dict], str, float]:
     """Run a single diagnostic conversation episode.
 
@@ -321,12 +322,21 @@ def run_episode(
         disease_info: Disease definition for the patient
         max_turns: Maximum number of conversation turns
         use_gpt_patient: Whether to use GPT-4o-mini for patient responses
+        verbose: Whether to print detailed conversation logs
 
     Returns:
         Tuple of (conversation history, final diagnosis, reward)
     """
     # Set up patient agent with the disease
     patient = PatientAgent(disease_info, use_llm=use_gpt_patient)
+    
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"STARTING DIAGNOSTIC EPISODE")
+        print(f"Disease: {disease_info['disease_name']}")
+        print(f"Symptoms present: {', '.join([s for s, v in disease_info['symptoms'].items() if v])}")
+        print(f"Symptoms absent: {', '.join([s for s, v in disease_info['symptoms'].items() if not v])}")
+        print(f"{'='*60}\n")
 
     # Initialize conversation with system prompt
     conversation = [
@@ -354,10 +364,16 @@ Your final diagnosis here
     # Initial prompt from patient
     patient_initial = "Doctor, I'm not feeling well today."
     conversation.append({"role": "user", "content": patient_initial})
+    
+    if verbose:
+        print(f"TURN 0 - PATIENT: {patient_initial}")
 
     # Main conversation loop
     final_diagnosis = None
     for turn in range(max_turns):
+        if verbose:
+            print(f"\n{'='*20} TURN {turn+1} {'='*20}")
+            
         # Get doctor's response
         prompt = tokenizer.apply_chat_template(
             conversation, tokenize=False, add_generation_prompt=True
@@ -381,6 +397,9 @@ Your final diagnosis here
 
         # Add doctor's response to conversation
         conversation.append({"role": "assistant", "content": response})
+        
+        if verbose:
+            print(f"DOCTOR: {response}")
 
         # Check if final diagnosis was given
         if "final diagnosis:" in response.lower():
@@ -390,19 +409,32 @@ Your final diagnosis here
             )
             if diagnosis_match:
                 final_diagnosis = diagnosis_match.group(1).strip()
+                if verbose:
+                    print(f"\nFINAL DIAGNOSIS FOUND: {final_diagnosis}")
             else:
                 # Try to extract from the <answer> tag
                 answer_match = re.search(r"<answer>\s*([^<]+)", response)
                 if answer_match:
                     final_diagnosis = answer_match.group(1).strip()
+                    if verbose:
+                        print(f"\nFINAL DIAGNOSIS FOUND IN <answer> TAG: {final_diagnosis}")
             break
 
         # Get patient's response
         patient_response = patient.answer_question(response)
         conversation.append({"role": "user", "content": patient_response})
+        
+        if verbose:
+            # Show what the patient actually sees (cleaned message)
+            clean_response = patient._clean_doctor_message(response)
+            print(f"\nPATIENT SEES: {clean_response}")
+            print(f"PATIENT RESPONDS: {patient_response}")
 
     # If no final diagnosis was given, force one in the last turn
     if final_diagnosis is None:
+        if verbose:
+            print(f"\n{'='*20} FINAL TURN - REQUESTING DIAGNOSIS {'='*20}")
+            
         prompt = tokenizer.apply_chat_template(
             conversation
             + [{"role": "user", "content": "Please provide your final diagnosis now."}],
@@ -429,6 +461,10 @@ Your final diagnosis here
             {"role": "user", "content": "Please provide your final diagnosis now."}
         )
         conversation.append({"role": "assistant", "content": final_response})
+        
+        if verbose:
+            print(f"PATIENT: Please provide your final diagnosis now.")
+            print(f"DOCTOR: {final_response}")
 
         # Extract the diagnosis
         diagnosis_match = re.search(
@@ -436,16 +472,30 @@ Your final diagnosis here
         )
         if diagnosis_match:
             final_diagnosis = diagnosis_match.group(1).strip()
+            if verbose:
+                print(f"\nFINAL DIAGNOSIS FOUND: {final_diagnosis}")
         else:
             # Try to extract from the <answer> tag
             answer_match = re.search(r"<answer>\s*([^<]+)", final_response)
             if answer_match:
                 final_diagnosis = answer_match.group(1).strip()
+                if verbose:
+                    print(f"\nFINAL DIAGNOSIS FOUND IN <answer> TAG: {final_diagnosis}")
             else:
                 final_diagnosis = "No clear diagnosis provided"
+                if verbose:
+                    print(f"\nNO CLEAR DIAGNOSIS FOUND IN RESPONSE")
 
     # Calculate reward based on diagnostic accuracy
     reward = calculate_reward(final_diagnosis, disease_info)
+    
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"EPISODE SUMMARY")
+        print(f"Actual disease: {disease_info['disease_name']}")
+        print(f"Final diagnosis: {final_diagnosis}")
+        print(f"Reward: {reward:.2f}")
+        print(f"{'='*60}\n")
 
     return conversation, final_diagnosis, reward
 
@@ -579,6 +629,17 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
     
     rewards = []
     
+    # Log the prompts for debugging
+    print(f"\n========== CONVERSATION CONTEXT ==========")
+    print(f"Disease: {disease_info[0]['disease_name']}")
+    print(f"Symptoms present: {', '.join([s for s, v in disease_info[0]['symptoms'].items() if v])}")
+    print(f"Symptoms absent: {', '.join([s for s, v in disease_info[0]['symptoms'].items() if not v])}")
+    
+    if isinstance(prompts, list) and len(prompts) > 0:
+        prompt_preview = prompts[0][-200:] if len(prompts[0]) > 200 else prompts[0]
+        print(f"Prompt context preview: {prompt_preview}...")
+    print(f"========== END CONTEXT ==========\n")
+    
     for i, completion in enumerate(completions):
         # Check what we're getting and extract content safely
         if isinstance(completion, list) and len(completion) > 0 and isinstance(completion[0], dict) and 'content' in completion[0]:
@@ -586,6 +647,11 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
         else:
             print(f"WARNING: Unexpected completion format: {completion}")
             content = str(completion)  # Try to convert to string
+        
+        # Log the full completion for debugging
+        print(f"\n========== COMPLETION {i+1}/{len(completions)} ==========")
+        print(content)
+        print(f"========== END COMPLETION {i+1} ==========\n")
         
         # Use GPT-4o-mini evaluation function with debugging information
         print(f"Evaluating completion {i+1}/{len(completions)}")
@@ -1302,31 +1368,56 @@ def test_model(model, tokenizer, num_tests=5, use_gpt_patient=True):
         use_gpt_patient: Whether to use GPT-4o-mini for patient responses
     """
     print("\n========= TESTING MODEL =========\n")
+    print(f"Running {num_tests} diagnostic episodes with full conversation logging")
 
     # Load the trained LoRA adapter
     lora_adapter = model.load_lora(SAVED_MODEL_PATH)
 
     total_reward = 0.0
+    diagnoses = []
 
     for i in range(num_tests):
         # Generate a random disease for testing
         disease = generate_disease()
-        print(f"Test case {i + 1}: Patient has {disease['disease_name']}")
+        print(f"\n\n{'#'*80}")
+        print(f"TEST CASE {i + 1}/{num_tests}")
+        print(f"{'#'*80}\n")
 
-        # Run a diagnostic episode
+        # Run a diagnostic episode with verbose logging
         conversation, diagnosis, reward = run_episode(
-            model, tokenizer, lora_adapter, disease, use_gpt_patient=use_gpt_patient
+            model, tokenizer, lora_adapter, disease, 
+            use_gpt_patient=use_gpt_patient,
+            verbose=True  # Enable detailed conversation logging
         )
 
-        # Print results
-        print(f"Final diagnosis: {diagnosis}")
-        print(f"Reward: {reward:.2f}")
-        print("-" * 50)
+        diagnoses.append({
+            "disease": disease["disease_name"],
+            "diagnosis": diagnosis,
+            "reward": reward,
+            "turns": len(conversation) // 2 - 1  # Approximate turn count
+        })
 
         total_reward += reward
 
-    # Print overall performance
-    print(f"\nAverage reward: {total_reward / num_tests:.2f}")
+    # Print overall performance summary
+    print(f"\n{'='*80}")
+    print(f"TESTING SUMMARY")
+    print(f"{'='*80}")
+    print(f"Total test cases: {num_tests}")
+    print(f"Average reward: {total_reward / num_tests:.2f}")
+    
+    # Print individual test results in table format
+    print("\nIndividual test results:")
+    print(f"{'Case':<5} {'Actual Disease':<30} {'Diagnosis':<30} {'Reward':<10} {'Turns':<10}")
+    print(f"{'-'*5:<5} {'-'*30:<30} {'-'*30:<30} {'-'*10:<10} {'-'*10:<10}")
+    
+    for i, result in enumerate(diagnoses):
+        # Truncate strings if too long
+        disease = result["disease"][:27] + "..." if len(result["disease"]) > 30 else result["disease"]
+        diagnosis = result["diagnosis"][:27] + "..." if len(result["diagnosis"]) > 30 else result["diagnosis"]
+        
+        print(f"{i+1:<5} {disease:<30} {diagnosis:<30} {result['reward']:<10.2f} {result['turns']:<10}")
+    
     print("\n========= TESTING COMPLETE =========\n")
 
 
