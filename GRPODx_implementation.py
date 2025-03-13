@@ -113,23 +113,89 @@ def format_conversation(conversation_history):
     return formatted_messages
 
 # Patient agent simulation
-def patient_response(question, disease_info):
-    """Simulate a patient response based on the disease info"""
+def patient_response(question, disease_info, conversation_history=None):
+    """
+    Simulate a patient response based on the disease info and conversation history
+    
+    Args:
+        question: The doctor's question
+        disease_info: Dictionary containing disease information and symptoms
+        conversation_history: Optional list of previous messages
+        
+    Returns:
+        A simulated patient response
+    """
     symptoms = disease_info["symptoms"]
+    question_lower = question.lower()
     
-    # Check if the question contains known symptoms
-    response = "I'm not sure what you mean."
+    # Track previous responses to avoid repetition
+    previous_responses = []
+    if conversation_history:
+        previous_responses = [
+            m["content"] for m in conversation_history if m["role"] == "user"
+        ]
     
+    # Check for repeated question
+    if any(question in prev_q for prev_q in previous_responses[-3:] if isinstance(prev_q, str)):
+        return "I already answered that question. Can you ask me something else?"
+    
+    # Detect if doctor is asking about multiple symptoms at once
+    detected_symptoms = []
     for symptom, has_symptom in symptoms.items():
         # Simple keyword matching for symptoms in the question
-        if symptom.replace("_", " ") in question.lower():
-            if has_symptom:
-                response = f"Yes, I have {symptom.replace('_', ' ')}."
-            else:
-                response = f"No, I don't have {symptom.replace('_', ' ')}."
-            break
+        symptom_text = symptom.replace("_", " ")
+        if symptom_text in question_lower:
+            detected_symptoms.append((symptom, has_symptom))
     
-    return response
+    # If multiple symptoms detected, respond to all of them
+    if len(detected_symptoms) > 1:
+        responses = []
+        for symptom, has_symptom in detected_symptoms:
+            symptom_text = symptom.replace("_", " ")
+            if has_symptom:
+                responses.append(f"Yes, I have {symptom_text}")
+            else:
+                responses.append(f"No, I don't have {symptom_text}")
+        return "Let me answer each part. " + ". ".join(responses) + "."
+    
+    # If only one symptom detected, give a direct answer
+    elif len(detected_symptoms) == 1:
+        symptom, has_symptom = detected_symptoms[0]
+        symptom_text = symptom.replace("_", " ")
+        if has_symptom:
+            return f"Yes, I have {symptom_text}."
+        else:
+            return f"No, I don't have {symptom_text}."
+    
+    # Handle yes/no questions about general health status
+    elif "how are you feeling" in question_lower or "how do you feel" in question_lower:
+        # Count positive symptoms to determine how bad the patient feels
+        positive_symptoms = sum(1 for _, has_symptom in symptoms.items() if has_symptom)
+        if positive_symptoms > 3:
+            return "I'm feeling really terrible right now."
+        elif positive_symptoms > 1:
+            return "I'm not feeling well at all."
+        else:
+            return "I'm feeling a bit under the weather, but not terrible."
+    
+    # Handle duration questions
+    elif "how long" in question_lower or "when did" in question_lower or "started" in question_lower:
+        return "These symptoms started about two days ago."
+    
+    # Handle severity questions
+    elif "how severe" in question_lower or "how bad" in question_lower or "intensity" in question_lower:
+        return "The symptoms are moderate, but they're affecting my daily activities."
+    
+    # Handle medication questions
+    elif "medication" in question_lower or "medicine" in question_lower or "taking" in question_lower:
+        return "I haven't taken any medication for this yet."
+    
+    # Handle medical history questions
+    elif "history" in question_lower or "previous" in question_lower or "before" in question_lower:
+        return "I've never experienced these exact symptoms before."
+    
+    # Default response for unrecognized questions
+    return "I'm not sure about that. Can you ask me something more specific about my symptoms?"
 
 # Extract parts from model output
 def extract_reasoning(text):
@@ -289,7 +355,7 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=5):
             break
         
         # Generate patient's response
-        patient_reply = patient_response(question_text, disease_info)
+        patient_reply = patient_response(question_text, disease_info, conversation)
         conversation.append({"role": "user", "content": patient_reply})
     
     # Calculate reward

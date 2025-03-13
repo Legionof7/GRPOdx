@@ -43,23 +43,17 @@ TEST_DISEASE_BANK.extend(related_diseases)
 # Keep a reference to the base disease for reporting
 BASE_DISEASE_FOR_RELATED_TESTS = base_disease
 
-def simulate_patient_response(question, disease_info):
-    """Simulate a patient response based on the disease info"""
-    symptoms = disease_info["symptoms"]
+def simulate_patient_response(question, disease_info, conversation_history=None):
+    """
+    Simulate a patient response based on the disease info and conversation history
     
-    # Check if the question contains known symptoms
-    response = "I'm not sure what you mean."
+    This is a wrapper for the main patient_response function in GRPODx_implementation.py
+    """
+    # Import the main patient response function from GRPODx_implementation
+    from GRPODx_implementation import patient_response
     
-    for symptom, has_symptom in symptoms.items():
-        # Simple keyword matching for symptoms in the question
-        if symptom.replace("_", " ") in question.lower():
-            if has_symptom:
-                response = f"Yes, I have {symptom.replace('_', ' ')}."
-            else:
-                response = f"No, I don't have {symptom.replace('_', ' ')}."
-            break
-    
-    return response
+    # Use the enhanced patient response function
+    return patient_response(question, disease_info, conversation_history)
 
 def run_test_episode(model, tokenizer, disease_info=None, max_turns=8, verbose=True):
     """
@@ -141,7 +135,7 @@ def run_test_episode(model, tokenizer, disease_info=None, max_turns=8, verbose=T
             break
         
         # Generate patient's response
-        patient_reply = simulate_patient_response(question_text, disease_info)
+        patient_reply = simulate_patient_response(question_text, disease_info, conversation)
         if verbose:
             print(f"Patient: {patient_reply}")
         conversation.append({"role": "user", "content": patient_reply})
