@@ -614,30 +614,78 @@ def calculate_verdict_reward(diagnosis, disease_info, conversation, num_turns=0)
         verdict_files = [f for f in local_files if 'verdict' in f.lower()]
         if verdict_files:
             print(f"WARNING: Found local verdict files that may conflict with imports: {verdict_files}")
+            
+            # Attempt to rename any verdict.py files to prevent import conflicts
+            if 'verdict.py' in local_files:
+                backup_name = 'verdict.py.bak'
+                counter = 1
+                while backup_name in local_files:
+                    backup_name = f'verdict.py.bak{counter}'
+                    counter += 1
+                    
+                try:
+                    print(f"Renaming verdict.py to {backup_name} to avoid import conflicts")
+                    os.rename(os.path.join(cwd, 'verdict.py'), os.path.join(cwd, backup_name))
+                    print(f"Successfully renamed verdict.py to {backup_name}")
+                except Exception as e:
+                    print(f"Failed to rename verdict.py: {e}")
         
-        # Ensure the current directory isn't interfering with imports
-        current_dir = ''
-        if current_dir in sys.path:
-            # Temporarily remove current directory from path to avoid local imports
-            print("Removing current directory from sys.path to avoid local imports")
-            sys.path.remove(current_dir)
+        # Modify sys.path to ensure installed packages are used first
+        # Completely rebuild sys.path to prioritize site-packages
+        print("Modifying sys.path to prioritize installed packages...")
+        original_path = list(sys.path)
+        
+        # Remove current directory from path entirely
+        if '' in sys.path:
+            sys.path.remove('')
+            print("Removed current directory from sys.path")
+            
+        # Get the site-packages directory
+        import site
+        site_packages = site.getsitepackages()
+        print(f"Site packages directories: {site_packages}")
+        
+        # Prioritize site-packages at the beginning of sys.path
+        for sp in reversed(site_packages):
+            if sp not in sys.path:
+                sys.path.insert(0, sp)
+                print(f"Added {sp} to beginning of sys.path")
+                
+        print(f"Modified sys.path: {sys.path}")
             
         # Check if verdict is installed and API keys are available
         import importlib.util
         try:
+            # Try to find the installed verdict package
             verdict_spec = importlib.util.find_spec("verdict")
             print(f"Verdict spec found: {verdict_spec}")
             if verdict_spec:
                 print(f"Verdict origin: {verdict_spec.origin}")
                 print(f"Verdict submodule_search_locations: {verdict_spec.submodule_search_locations}")
+                
+                # Check if the found verdict is a local file rather than installed package
+                if os.path.dirname(verdict_spec.origin) == cwd or verdict_spec.origin.endswith('/workspace/GRPOdx/verdict.py'):
+                    print("WARNING: Found verdict.py is a local file, not the installed package!")
+                    print("Attempting to force import from site-packages...")
+                    
+                    # Try to import directly from site packages
+                    for sp in site_packages:
+                        verdict_path = os.path.join(sp, 'verdict')
+                        if os.path.exists(verdict_path):
+                            print(f"Found verdict in {verdict_path}")
+                            if sp not in sys.path:
+                                sys.path.insert(0, sp)
+                                print(f"Added {sp} to beginning of sys.path")
+                            break
         except Exception as e:
             print(f"Error checking for verdict module: {e}")
             verdict_spec = None
         
-        # Restore path if we modified it
-        if current_dir not in sys.path:
-            print("Restoring current directory to sys.path")
-            sys.path.insert(0, current_dir)
+        # Restore original path at the end, but keep site-packages at front
+        print("Restoring original sys.path with site-packages prioritized")
+        for path in original_path:
+            if path != '' and path not in sys.path:  # Don't add current dir back
+                sys.path.append(path)
             
         if verdict_spec is None:
             print("Verdict not installed. To use Verdict-based rewards:")
@@ -652,31 +700,76 @@ def calculate_verdict_reward(diagnosis, disease_info, conversation, num_turns=0)
             print("Falling back to traditional reward calculation")
             return calculate_traditional_reward(diagnosis, disease_info, [])
         
-        # Import verdict modules directly from the installed package
-        try:    
-            # Use absolute imports to avoid the local verdict.py file
-            print("Attempting to import verdict modules...")
-            print("First importing the main verdict module")
-            import verdict
-            print(f"Successfully imported verdict main module")
+        # Make sure we don't use local verdict.py by using a direct import from a specific path
+        try:
+            print("Attempting to import verdict modules using a dynamic approach...")
             
-            print("Now importing specific verdict modules")
-            from verdict import Pipeline, Layer
-            print("Imported Pipeline and Layer")
-            
-            from verdict.common.judge import CategoricalJudgeUnit
-            print("Imported CategoricalJudgeUnit")
-            
-            from verdict.scale import DiscreteScale
-            print("Imported DiscreteScale")
-            
-            from verdict.transform import MaxPoolUnit
-            print("Imported MaxPoolUnit")
-            
-            from verdict.schema import Schema
-            print("Imported Schema")
-            
-            print(f"Successfully imported all verdict modules, version: {getattr(verdict, '__version__', 'unknown')}")
+            # First, try to find the verdict package in site-packages
+            verdict_in_site = None
+            for sp in site_packages:
+                verdict_path = os.path.join(sp, 'verdict')
+                if os.path.exists(verdict_path) and os.path.isdir(verdict_path):
+                    verdict_in_site = verdict_path
+                    print(f"Found verdict directory in site-packages: {verdict_path}")
+                    break
+                    
+            if verdict_in_site:
+                print(f"Will attempt to import directly from {verdict_in_site}")
+                
+                # Try the direct import approach
+                import importlib
+                print("Creating a spec from the found verdict directory")
+                verdict_spec = importlib.util.spec_from_file_location("verdict", 
+                                os.path.join(verdict_in_site, "__init__.py"))
+                verdict = importlib.util.module_from_spec(verdict_spec)
+                print("Loading the module using the spec")
+                verdict_spec.loader.exec_module(verdict)
+                print(f"Successfully imported verdict directly from {verdict_in_site}")
+                
+                # Now import the rest using normal imports
+                print("Now importing specific verdict modules")
+                from verdict import Pipeline, Layer
+                print("Imported Pipeline and Layer")
+                
+                from verdict.common.judge import CategoricalJudgeUnit
+                print("Imported CategoricalJudgeUnit")
+                
+                from verdict.scale import DiscreteScale
+                print("Imported DiscreteScale")
+                
+                from verdict.transform import MaxPoolUnit
+                print("Imported MaxPoolUnit")
+                
+                from verdict.schema import Schema
+                print("Imported Schema")
+                
+                print(f"Successfully imported all verdict modules, version: {getattr(verdict, '__version__', 'unknown')}")
+            else:
+                # Fallback to regular imports if we couldn't find verdict in site-packages
+                print("Could not find verdict in site-packages. Attempting standard imports...")
+                
+                # Try to use absolute imports
+                print("First importing the main verdict module")
+                import verdict
+                print(f"Successfully imported verdict main module")
+                
+                print("Now importing specific verdict modules")
+                from verdict import Pipeline, Layer
+                print("Imported Pipeline and Layer")
+                
+                from verdict.common.judge import CategoricalJudgeUnit
+                print("Imported CategoricalJudgeUnit")
+                
+                from verdict.scale import DiscreteScale
+                print("Imported DiscreteScale")
+                
+                from verdict.transform import MaxPoolUnit
+                print("Imported MaxPoolUnit")
+                
+                from verdict.schema import Schema
+                print("Imported Schema")
+                
+                print(f"Successfully imported all verdict modules, version: {getattr(verdict, '__version__', 'unknown')}")
         except ImportError as e:
             print(f"Error importing verdict modules: {e}")
             # Print traceback for more debugging info
