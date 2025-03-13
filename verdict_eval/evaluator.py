@@ -1,13 +1,28 @@
+import sys
+import os
+import subprocess
+
+# Try to import Verdict, install it if not available
 try:
     from verdict import Pipeline  
     from verdict.common.judge import NumericJudgeUnit
     from verdict.schema import Schema
 except ImportError:
-    # If verdict is not installed, provide informative error
-    raise ImportError(
-        "Verdict package is not installed. Please install it using: "
-        "pip install verdict or run install_verdict.py"
-    )
+    # If Verdict is not installed, try to install it
+    print("Verdict not found. Installing...")
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "verdict"])
+        # Import after installation
+        from verdict import Pipeline  
+        from verdict.common.judge import NumericJudgeUnit
+        from verdict.schema import Schema
+        print("Successfully installed and imported Verdict")
+    except Exception as e:
+        # Still couldn't install, raise informative error
+        raise ImportError(
+            f"Failed to install Verdict: {e}. Please install manually: "
+            "pip install verdict"
+        )
 from typing import Dict, Optional
 
 def create_verdict_evaluator():

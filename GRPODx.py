@@ -581,69 +581,77 @@ Evaluate and provide a score from 0.0 to 1.0:"""
     return 0.0
 
 
-def evaluate_diagnosis(response, disease_info, verbose=False):
-    """Built-in diagnosis evaluation function that doesn't rely on external packages.
-    
-    Args:
-        response: Text response from the doctor model
-        disease_info: Disease information dictionary
-        verbose: Whether to print detailed information
+# Import the proper verdict evaluation
+try:
+    # Attempt to import from verdict_eval
+    from verdict_eval import evaluate_diagnosis
+    print("Successfully imported evaluate_diagnosis from verdict_eval")
+except ImportError:
+    # Define a fallback function in case verdict_eval import fails
+    def evaluate_diagnosis(response, disease_info, verbose=False):
+        """Fallback diagnosis evaluation function if verdict_eval fails.
         
-    Returns:
-        Reward score between 0.0 and 1.0
-    """
-    # Extract diagnosis and calculate basic reward
-    import re
-    diagnosis = None
-    
-    # Extract diagnosis
-    diagnosis_match = re.search(r"final diagnosis:\s*([^.\n]+)", response.lower())
-    if diagnosis_match:
-        diagnosis = diagnosis_match.group(1).strip()
-    else:
-        # Try to extract from the <answer> tag
-        answer_match = re.search(r"<answer>\s*([^<]+)", response)
-        if answer_match:
-            diagnosis = answer_match.group(1).strip()
-    
-    # Extract reasoning but don't use it directly in scoring
-    has_reasoning = False
-    reasoning_match = re.search(r"<reasoning>(.*?)</reasoning>", response, re.DOTALL)
-    if reasoning_match:
-        has_reasoning = True
-    
-    # Calculate basic reward
-    reward = 0.1  # Base reward
-    
-    # Format checking
-    if "<reasoning>" in response and "</reasoning>" in response:
-        reward += 0.2
-    if "<answer>" in response and "</answer>" in response:
-        reward += 0.1
-    if "final diagnosis:" in response.lower():
-        reward += 0.1
-    
-    # Diagnosis checking (simplified)
-    if diagnosis:
-        if disease_info["disease_name"].lower() in diagnosis.lower():
-            reward += 0.6
+        Args:
+            response: Text response from the doctor model
+            disease_info: Disease information dictionary
+            verbose: Whether to print detailed information
+            
+        Returns:
+            Reward score between 0.0 and 1.0
+        """
+        print("WARNING: Using fallback evaluation function")
+        # Extract diagnosis and calculate basic reward
+        import re
+        diagnosis = None
+        
+        # Extract diagnosis
+        diagnosis_match = re.search(r"final diagnosis:\s*([^.\n]+)", response.lower())
+        if diagnosis_match:
+            diagnosis = diagnosis_match.group(1).strip()
         else:
-            # Check for partial matches
-            for term in disease_info["disease_name"].lower().split():
-                if term in diagnosis.lower() and len(term) > 3:  # Avoid matching short words
-                    reward += 0.2
-                    break
-    
-    if verbose:
-        print(f"Diagnosis: {diagnosis or 'None'}")
-        print(f"Has reasoning: {has_reasoning}")
-        print(f"Reward: {reward:.2f}")
-    
-    return min(1.0, reward)
+            # Try to extract from the <answer> tag
+            answer_match = re.search(r"<answer>\s*([^<]+)", response)
+            if answer_match:
+                diagnosis = answer_match.group(1).strip()
+        
+        # Extract reasoning but don't use it directly in scoring
+        has_reasoning = False
+        reasoning_match = re.search(r"<reasoning>(.*?)</reasoning>", response, re.DOTALL)
+        if reasoning_match:
+            has_reasoning = True
+        
+        # Calculate basic reward
+        reward = 0.1  # Base reward
+        
+        # Format checking
+        if "<reasoning>" in response and "</reasoning>" in response:
+            reward += 0.2
+        if "<answer>" in response and "</answer>" in response:
+            reward += 0.1
+        if "final diagnosis:" in response.lower():
+            reward += 0.1
+        
+        # Diagnosis checking (simplified)
+        if diagnosis:
+            if disease_info["disease_name"].lower() in diagnosis.lower():
+                reward += 0.6
+            else:
+                # Check for partial matches
+                for term in disease_info["disease_name"].lower().split():
+                    if term in diagnosis.lower() and len(term) > 3:  # Avoid matching short words
+                        reward += 0.2
+                        break
+        
+        if verbose:
+            print(f"Diagnosis: {diagnosis or 'None'}")
+            print(f"Has reasoning: {has_reasoning}")
+            print(f"Reward: {reward:.2f}")
+        
+        return min(1.0, reward)
 
 
 def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[float]:
-    """GRPO reward function that uses built-in evaluation to avoid external dependencies.
+    """GRPO reward function that uses Verdict for evaluation.
 
     Args:
         prompts: Input prompts
@@ -653,8 +661,7 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
     Returns:
         List of reward values between 0 and 1
     """
-    # Using built-in evaluation function instead of Verdict
-    print("Using built-in evaluation function")
+    print("Using Verdict-based evaluation function")
     
     rewards = []
     print("Calculating rewards...")
@@ -685,17 +692,46 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
 
 
 def format_reward_function(completions, **kwargs) -> List[float]:
-    """Placeholder format reward function (not actively used).
-    Format evaluation is now integrated into the main reward function.
+    """Format reward function focusing only on structure/format.
+    This works alongside the Verdict evaluation to ensure properly structured output.
 
     Args:
         completions: Model completions
 
     Returns:
-        List of minimal values
+        List of format rewards
     """
-    rewards = [0.05] * len(completions)
-    print("Format rewards integrated into main evaluation function")
+    rewards = []
+    print("Calculating format-specific rewards...")
+
+    for i, completion in enumerate(completions):
+        content = completion[0]["content"]
+        reward = 0.0
+        
+        # Check for XML tags and proper formatting
+        if "<reasoning>" in content and "</reasoning>" in content:
+            reward += 0.3
+            print(f"Format {i+1}/{len(completions)}: Found proper reasoning tags (+0.3)")
+        elif "<reasoning>" in content:  # Partial tag
+            reward += 0.1
+            print(f"Format {i+1}/{len(completions)}: Found partial reasoning tags (+0.1)")
+            
+        if "<answer>" in content and "</answer>" in content:
+            reward += 0.2
+            print(f"Format {i+1}/{len(completions)}: Found proper answer tags (+0.2)")
+        
+        if "final diagnosis:" in content.lower():
+            reward += 0.1
+            print(f"Format {i+1}/{len(completions)}: Found proper diagnosis format (+0.1)")
+            
+        # Give minimal reward for any non-empty response to prevent zero rewards
+        if len(content.strip()) > 0 and reward == 0:
+            reward = 0.05
+            print(f"Format {i+1}/{len(completions)}: Minimal non-empty response (+0.05)")
+            
+        rewards.append(reward)
+        print(f"Format reward {i+1}/{len(completions)}: {reward:.2f}")
+    
     return rewards
 
 
