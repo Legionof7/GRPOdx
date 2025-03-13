@@ -595,7 +595,65 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
     Returns:
         List of reward values between 0 and 1
     """
-    from verdict_eval import evaluate_diagnosis
+    try:
+        from verdict_eval import evaluate_diagnosis
+    except ImportError as e:
+        # If Verdict is not installed, try to install it
+        print(f"Error importing verdict_eval: {e}")
+        print("Attempting to install Verdict...")
+        try:
+            import subprocess
+            import sys
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "verdict"])
+            from verdict_eval import evaluate_diagnosis
+            print("Successfully installed Verdict and imported evaluate_diagnosis")
+        except Exception as install_error:
+            print(f"Failed to install Verdict: {install_error}")
+            # Fallback to a simplified reward function
+            print("Using fallback reward function")
+            def evaluate_diagnosis(response, disease_info, verbose=False):
+                """Simplified fallback evaluation without Verdict."""
+                # Extract diagnosis and calculate basic reward
+                import re
+                diagnosis = None
+                reasoning = ""
+                
+                # Extract diagnosis
+                diagnosis_match = re.search(r"final diagnosis:\s*([^.\n]+)", response.lower())
+                if diagnosis_match:
+                    diagnosis = diagnosis_match.group(1).strip()
+                else:
+                    # Try to extract from the <answer> tag
+                    answer_match = re.search(r"<answer>\s*([^<]+)", response)
+                    if answer_match:
+                        diagnosis = answer_match.group(1).strip()
+                
+                # Extract reasoning
+                reasoning_match = re.search(r"<reasoning>(.*?)</reasoning>", response, re.DOTALL)
+                if reasoning_match:
+                    reasoning = reasoning_match.group(1).strip()
+                
+                # Calculate basic reward
+                reward = 0.1  # Base reward
+                
+                # Format checking
+                if "<reasoning>" in response and "</reasoning>" in response:
+                    reward += 0.2
+                if "<answer>" in response and "</answer>" in response:
+                    reward += 0.1
+                
+                # Diagnosis checking (simplified)
+                if diagnosis:
+                    if disease_info["disease_name"].lower() in diagnosis.lower():
+                        reward += 0.6
+                    else:
+                        # Check for partial matches
+                        for term in disease_info["disease_name"].lower().split():
+                            if term in diagnosis.lower() and len(term) > 3:  # Avoid matching short words
+                                reward += 0.2
+                                break
+                
+                return min(1.0, reward)
     
     rewards = []
     print("Calculating rewards using Verdict evaluator...")

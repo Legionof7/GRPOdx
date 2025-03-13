@@ -1,6 +1,13 @@
-from verdict import Pipeline
-from verdict.common.judge import NumericJudgeUnit
-from verdict.schema import Schema
+try:
+    from verdict import Pipeline  
+    from verdict.common.judge import NumericJudgeUnit
+    from verdict.schema import Schema
+except ImportError:
+    # If verdict is not installed, provide informative error
+    raise ImportError(
+        "Verdict package is not installed. Please install it using: "
+        "pip install verdict or run install_verdict.py"
+    )
 from typing import Dict, Optional
 
 def create_verdict_evaluator():
