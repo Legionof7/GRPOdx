@@ -22,14 +22,14 @@ def main():
     max_seq_length = 4096  # Updated to match the new context window
     lora_rank = 8
     
-    # Load base model - updated to use Llama 3 70B
+    # Load base model - using unsloth GGUF 70B model
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="meta-llama/Meta-Llama-3-70B-Instruct",
+        model_name="unsloth/Llama-3.3-70B-Instruct-GGUF",
         max_seq_length=max_seq_length,
         load_in_4bit=True,
         fast_inference=True,
         max_lora_rank=lora_rank,
-        gpu_memory_utilization=0.9,  # Increased for 70B model
+        gpu_memory_utilization=0.85,  # Optimized setting
     )
     
     # Load LoRA weights
