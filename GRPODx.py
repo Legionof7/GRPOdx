@@ -583,7 +583,8 @@ Evaluate and provide a score from 0.0 to 1.0:"""
 
 
 def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[float]:
-    """GRPO reward function that calculates numerical rewards for each completion.
+    """GRPO reward function that calculates numerical rewards for each completion
+    using GPT-4o-mini verifier for diagnosis evaluation.
 
     Args:
         prompts: Input prompts
@@ -594,12 +595,10 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
         List of reward values between 0 and 1
     """
     rewards = []
+    print("Calculating rewards using GPT-4o-mini verifier...")
 
-    for completion in completions:
+    for i, completion in enumerate(completions):
         content = completion[0]["content"]
-        
-        # Base reward for any response
-        base_reward = 0.1
         
         # Extract the diagnosis from completion
         diagnosis = None
@@ -617,39 +616,50 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
         reasoning_match = re.search(r"<reasoning>(.*?)</reasoning>", content, re.DOTALL)
         if reasoning_match:
             reasoning = reasoning_match.group(1).strip()
+        
+        # PRIMARY METHOD: Use GPT-4o-mini for comprehensive evaluation
+        if diagnosis or (reasoning and len(reasoning.split()) >= 30):
+            # If we have diagnosis or substantial reasoning, use GPT-4o-mini
+            diag_text = diagnosis if diagnosis else "No explicit diagnosis"
+            print(f"Eval {i+1}/{len(completions)}: Using GPT-4o-mini to evaluate diagnosis: {diag_text[:30]}...")
             
-            # Reward for quality reasoning even without diagnosis
-            if not diagnosis and len(reasoning.split()) >= 30:
-                # Give a small reward for good reasoning even without diagnosis
-                symptom_analysis = sum(1 for symptom in disease_info[0]["symptoms"] 
-                                    if symptom in reasoning.lower())
-                if symptom_analysis > 0:
-                    # Some reward for discussing relevant symptoms
-                    rewards.append(max(0.3, base_reward + (symptom_analysis * 0.05)))
-                    continue
-        
-        # If no diagnosis found, but there was some attempt, give a minimal reward
-        if not diagnosis:
-            # Check if there was at least an attempt at reasoning
-            if "<reasoning>" in content or "symptoms" in content.lower():
-                rewards.append(base_reward + 0.1)
-            else:
-                rewards.append(base_reward)
-            continue
-
-        # Calculate the reward using GPT-4o-mini
-        diagnosis_reward = calculate_numerical_reward(diagnosis, disease_info[0], reasoning)
-        
-        # Combine base reward with diagnosis reward
-        # This ensures even poor diagnoses get some minimal feedback
-        final_reward = max(base_reward + 0.1, diagnosis_reward)
-        rewards.append(final_reward)
-
+            # Calculate the reward using GPT-4o-mini verifier
+            reward = calculate_numerical_reward(
+                diagnosis if diagnosis else "", 
+                disease_info[0], 
+                reasoning
+            )
+            
+            # Add format bonus for structured output (max 0.2 additional)
+            format_bonus = 0.0
+            if "<reasoning>" in content and "</reasoning>" in content:
+                format_bonus += 0.1
+            if "<answer>" in content and "</answer>" in content:
+                format_bonus += 0.05
+            if "final diagnosis:" in content.lower():
+                format_bonus += 0.05
+                
+            # Cap total reward at 1.0
+            final_reward = min(1.0, reward + format_bonus)
+            rewards.append(final_reward)
+            print(f"Reward: {final_reward:.2f} (Verifier: {reward:.2f}, Format: {format_bonus:.2f})")
+        else:
+            # FALLBACK: For empty or minimal responses, use basic heuristic
+            base_reward = 0.1  # Minimal reward
+            
+            # Check if there was any attempt at a medical response
+            if "symptom" in content.lower() or "medical" in content.lower() or "diagnosis" in content.lower():
+                base_reward = 0.15
+                
+            rewards.append(base_reward)
+            print(f"Reward: {base_reward:.2f} (Minimal/empty response)")
+    
     return rewards
 
 
 def format_reward_function(completions, **kwargs) -> List[float]:
-    """Reward function that checks if the completion follows the required format.
+    """Lightweight reward function that checks if the completion follows the required format.
+    This is separate from the verifier reward and focuses only on structure/format.
 
     Args:
         completions: Model completions
@@ -658,40 +668,36 @@ def format_reward_function(completions, **kwargs) -> List[float]:
         List of reward values
     """
     rewards = []
+    print("Calculating format rewards...")
 
-    for completion in completions:
+    for i, completion in enumerate(completions):
         content = completion[0]["content"]
         reward = 0.0
 
-        # Base reward for any response to encourage participation
-        reward += 0.1
-
         # Check for reasoning section with proper XML tags
         if "<reasoning>" in content and "</reasoning>" in content:
-            reward += 0.5
-
-            # Check reasoning quality by length (simple heuristic)
-            reasoning = re.search(r"<reasoning>(.*?)</reasoning>", content, re.DOTALL)
-            if reasoning:
-                reasoning_text = reasoning.group(1).strip()
-                if len(reasoning_text.split()) >= 30:  # Good reasoning has at least 30 words
-                    reward += 0.25
-                # Add even more reward for particularly detailed reasoning
-                if len(reasoning_text.split()) >= 60:
-                    reward += 0.15
-        
-        # Even partial reasoning gets some credit
-        elif "<reasoning>" in content:
-            reward += 0.2
+            reward += 0.3
+            print(f"Format {i+1}/{len(completions)}: Found proper reasoning tags (+0.3)")
+        elif "<reasoning>" in content:  # Partial tag
+            reward += 0.1
+            print(f"Format {i+1}/{len(completions)}: Found partial reasoning tags (+0.1)")
             
         # Check for answer section with proper XML tags
         if "<answer>" in content and "</answer>" in content:
-            reward += 0.25
+            reward += 0.2
+            print(f"Format {i+1}/{len(completions)}: Found proper answer tags (+0.2)")
         
         # Check for diagnosis formatting
         if "final diagnosis:" in content.lower():
-            reward += 0.3
+            reward += 0.2
+            print(f"Format {i+1}/{len(completions)}: Found proper diagnosis format (+0.2)")
 
+        # Give partial reward for any non-empty response to prevent zero rewards
+        if len(content.strip()) > 0 and reward == 0:
+            reward = 0.05
+            print(f"Format {i+1}/{len(completions)}: Minimal non-empty response (+0.05)")
+
+        print(f"Format reward: {reward:.2f}")
         rewards.append(reward)
 
     return rewards
