@@ -66,11 +66,14 @@ python GRPODx.py --train
 # Test the model with simulated patients
 python GRPODx.py --test --num-tests 5 --use-gpt-patient
 
-# Run interactive chat mode to talk with the AI doctor
+# Run interactive chat mode where you act as the patient
 python GRPODx.py --interact
 
+# Run simulated chat mode to watch GPT-4o-mini patient interact with the doctor
+python GRPODx.py --simulate
+
 # Run multiple operations
-python GRPODx.py --train --test --interact
+python GRPODx.py --train --test --interact --simulate
 ```
 
 #### Training Mode
@@ -93,6 +96,12 @@ In interactive mode, you can:
 1. Chat directly with the AI doctor as a patient
 2. Describe your symptoms and answer the doctor's questions
 3. Receive a final diagnosis with structured reasoning
+
+#### Simulated Mode
+In simulated mode, you can:
+1. Observe a conversation between the AI doctor and a GPT-4o-mini patient
+2. Watch as the doctor analyzes a randomly generated disease scenario
+3. See the diagnostic accuracy compared to the ground truth disease
 
 ### Inference
 

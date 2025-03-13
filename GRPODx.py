@@ -621,6 +621,120 @@ def format_reward_function(completions, **kwargs) -> List[float]:
 # ======================================================================
 
 
+def run_simulated_chat(model, tokenizer, lora_adapter):
+    """Run a simulated chat between AI doctor and GPT-4o-mini patient.
+    
+    This allows the user to observe a conversation between the doctor model
+    and a simulated patient with a randomly generated disease.
+    
+    Args:
+        model: The trained doctor model
+        tokenizer: Tokenizer for the model
+        lora_adapter: LoRA adapter for the model
+    """
+    print("\n========= SIMULATED DIAGNOSIS CHAT =========\n")
+    print("You will observe a conversation between the AI doctor and a simulated patient.")
+    print("The patient will have a randomly generated disease.\n")
+    
+    # Generate a random disease
+    disease = generate_disease()
+    print(f"Patient has: {disease['disease_name']}")
+    print(f"Description: {disease.get('description', 'No description available')}")
+    print(f"Symptoms present: {', '.join([s for s, v in disease['symptoms'].items() if v])}")
+    print(f"Symptoms absent: {', '.join([s for s, v in disease['symptoms'].items() if not v])}")
+    print("\n--- Beginning of conversation ---\n")
+    
+    # Create patient agent
+    patient = PatientAgent(disease, use_llm=True)
+    
+    # Initialize conversation with system prompt
+    conversation = [
+        {"role": "system", "content": """You are an expert medical diagnostician. 
+Your goal is to determine the patient's condition by asking relevant questions.
+After gathering sufficient information, provide your final diagnosis.
+
+When you're ready to give your diagnosis, format it as:
+Final diagnosis: [your diagnosis]
+
+Format your reasoning as:
+<reasoning>
+Your step-by-step diagnostic reasoning here...
+</reasoning>
+
+Format your final answer as:
+<answer>
+Your final diagnosis here
+</answer>"""}
+    ]
+    
+    # Initial prompt from patient
+    patient_initial = "Doctor, I'm not feeling well today."
+    print(f"Patient: {patient_initial}")
+    conversation.append({"role": "user", "content": patient_initial})
+    
+    # Main conversation loop
+    max_turns = 10
+    for turn in range(max_turns):
+        # Get doctor's response
+        prompt = tokenizer.apply_chat_template(conversation, tokenize=False, add_generation_prompt=True)
+        
+        sampling_params = SamplingParams(
+            temperature=0.7,
+            top_p=0.95,
+            max_tokens=256,
+        )
+        
+        response = model.fast_generate(
+            prompt, 
+            sampling_params=sampling_params,
+            lora_request=lora_adapter
+        )[0].outputs[0].text
+        
+        # Add doctor's response to conversation
+        conversation.append({"role": "assistant", "content": response})
+        
+        # Display doctor's response
+        print(f"Doctor: {response}")
+        
+        # Check if final diagnosis was given
+        if "final diagnosis:" in response.lower():
+            print("\nDiagnosis session complete.")
+            
+            # Extract diagnosis and calculate reward
+            diagnosis_match = re.search(r"final diagnosis:\s*([^.\n]+)", response.lower())
+            if diagnosis_match:
+                final_diagnosis = diagnosis_match.group(1).strip()
+            else:
+                # Try to extract from the <answer> tag
+                answer_match = re.search(r"<answer>\s*([^<]+)", response)
+                if answer_match:
+                    final_diagnosis = answer_match.group(1).strip()
+                else:
+                    final_diagnosis = "No clear diagnosis provided"
+            
+            # Calculate reward
+            reward = calculate_reward(final_diagnosis, disease)
+            
+            # Display evaluation
+            print(f"\nActual disease: {disease['disease_name']}")
+            print(f"Doctor's diagnosis: {final_diagnosis}")
+            print(f"Diagnostic accuracy: {reward:.2f}/1.00")
+            break
+        
+        # Get patient's response
+        patient_response = patient.answer_question(response)
+        print(f"Patient: {patient_response}")
+        conversation.append({"role": "user", "content": patient_response})
+        
+        # Ask user if they want to continue or exit
+        user_input = input("\nPress Enter to continue or type 'exit' to end: ")
+        if user_input.lower() in ["quit", "exit"]:
+            print("Session ended.")
+            break
+    
+    print("\n--- End of conversation ---\n")
+
+
 def run_interactive_chat(model, tokenizer, lora_adapter):
     """Run an interactive chat session with a real user as the patient.
 
@@ -769,7 +883,10 @@ def main():
     parser.add_argument("--train", action="store_true", help="Train the model")
     parser.add_argument("--test", action="store_true", help="Test the model")
     parser.add_argument(
-        "--interact", action="store_true", help="Run interactive chat mode"
+        "--interact", action="store_true", help="Run interactive chat mode (you as patient)"
+    )
+    parser.add_argument(
+        "--simulate", action="store_true", help="Run simulated chat with GPT-4o-mini patient"
     )
     parser.add_argument(
         "--use-gpt-patient",
@@ -886,6 +1003,12 @@ def main():
         print(f"Loading model from {args.model_path} for interactive chat...")
         lora_adapter = model.load_lora(args.model_path)
         run_interactive_chat(model, tokenizer, lora_adapter)
+        
+    # Run simulated chat mode if requested
+    if args.simulate:
+        print(f"Loading model from {args.model_path} for simulated chat...")
+        lora_adapter = model.load_lora(args.model_path)
+        run_simulated_chat(model, tokenizer, lora_adapter)
 
 
 def test_model(model, tokenizer, num_tests=5, use_gpt_patient=True):
