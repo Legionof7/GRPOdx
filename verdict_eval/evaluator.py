@@ -14,6 +14,20 @@ def evaluate_diagnosis(response: str, disease_info: Dict, verbose: bool = False)
     Returns:
         Evaluation score between 0.0 and 1.0
     """
+    # Add debugging to see what we're evaluating
+    print("\n============ RESPONSE TO EVALUATE ============")
+    print(f"Evaluating response for disease: {disease_info['disease_name']}")
+    print(f"Response length: {len(response)} characters")
+    print(f"Response preview: {response[:100]}...")
+    
+    # Force response to string if needed
+    if not isinstance(response, str):
+        print(f"WARNING: response is not a string but {type(response)}")
+        if hasattr(response, 'content'):
+            response = response.content
+        else:
+            response = str(response)
+    
     # Get symptoms present and absent
     symptoms_present = [s for s, v in disease_info['symptoms'].items() if v]
     symptoms_absent = [s for s, v in disease_info['symptoms'].items() if not v]
@@ -23,16 +37,30 @@ def evaluate_diagnosis(response: str, disease_info: Dict, verbose: bool = False)
     diagnosis_match = re.search(r"final diagnosis:\s*([^.\n]+)", response.lower())
     if diagnosis_match:
         diagnosis = diagnosis_match.group(1).strip()
+        print(f"Found diagnosis: {diagnosis}")
     else:
         # Try to extract from the <answer> tag
         answer_match = re.search(r"<answer>\s*([^<]+)", response)
         if answer_match:
             diagnosis = answer_match.group(1).strip()
+            print(f"Found diagnosis in <answer> tag: {diagnosis}")
+        else:
+            print("No diagnosis found in response")
     
     # Check formatting
     has_reasoning = "<reasoning>" in response and "</reasoning>" in response
     has_answer = "<answer>" in response and "</answer>" in response
     has_diagnosis_format = "final diagnosis:" in response.lower()
+    
+    print(f"Formatting: reasoning tags: {has_reasoning}, answer tags: {has_answer}, diagnosis format: {has_diagnosis_format}")
+    
+    # If it's the same response showing up multiple times, we'll use the rule-based scoring
+    # to show more detailed information about what's happening
+    if len(response.strip()) < 20 or "I'm not feeling well today" in response:
+        print("Very short or initial patient message detected - using rule-based scoring instead")
+        score = rule_based_score(response, disease_info, has_reasoning, has_answer, has_diagnosis_format, diagnosis)
+        print(f"Rule-based score: {score:.2f}")
+        return score
     
     # Construct prompt for GPT-4o-mini
     system_message = """You are a medical evaluation system. Your task is to evaluate a doctor's diagnosis 
@@ -62,8 +90,7 @@ Doctor's Response:
 
 Evaluate and provide only a single number from 0.0 to 1.0:"""
     
-    if verbose:
-        print("Evaluating with GPT-4o-mini...")
+    print("Calling GPT-4o-mini for evaluation...")
         
     try:
         # Call GPT-4o-mini for evaluation
@@ -79,27 +106,27 @@ Evaluate and provide only a single number from 0.0 to 1.0:"""
         
         # Extract the score from the response
         score_text = api_response.choices[0].message.content.strip()
+        print(f"GPT-4o-mini response: {score_text}")
         
         # Try to convert to float
         try:
             score = float(score_text)
             # Ensure the score is within bounds
             score = max(0.0, min(1.0, score))
+            print(f"Parsed score: {score:.2f}")
         except ValueError:
             # If not a valid float, use rule-based scoring
-            if verbose:
-                print(f"Could not parse GPT response as float: {score_text}")
+            print(f"Could not parse GPT response as float: {score_text}")
             score = rule_based_score(response, disease_info, has_reasoning, has_answer, has_diagnosis_format, diagnosis)
+            print(f"Using rule-based score instead: {score:.2f}")
     
     except Exception as e:
         # Fall back to rule-based scoring
-        if verbose:
-            print(f"GPT-4o-mini evaluation failed: {e}")
+        print(f"GPT-4o-mini evaluation failed: {e}")
         score = rule_based_score(response, disease_info, has_reasoning, has_answer, has_diagnosis_format, diagnosis)
+        print(f"Using rule-based score due to error: {score:.2f}")
     
-    if verbose:
-        print(f"Evaluation score: {score:.2f}")
-    
+    print("============ END EVALUATION ============\n")
     return score
 
 def rule_based_score(response: str, disease_info: Dict, has_reasoning: bool, has_answer: bool, 

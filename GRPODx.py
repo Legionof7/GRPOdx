@@ -659,7 +659,7 @@ except ImportError:
 
 
 def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[float]:
-    """GRPO reward function that uses Verdict for evaluation.
+    """GRPO reward function that uses GPT-4o-mini for evaluation.
 
     Args:
         prompts: Input prompts
@@ -669,21 +669,41 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
     Returns:
         List of reward values between 0 and 1
     """
-        # Import the GPT-4o-mini based evaluator
+    # Import the GPT-4o-mini based evaluator
     from verdict_eval import evaluate_diagnosis
     print("Using GPT-4o-mini for evaluation")
+    
+    # Add debugging for completions inspection
+    print(f"\n========== COMPLETIONS DEBUG ==========")
+    print(f"Number of completions: {len(completions)}")
+    print(f"Disease: {disease_info[0]['disease_name']}")
+    for i, completion in enumerate(completions):
+        print(f"Completion {i+1} type: {type(completion)}")
+        print(f"Completion {i+1} structure: {completion}")
+        if isinstance(completion, list) and len(completion) > 0:
+            print(f"First item type: {type(completion[0])}")
+            if isinstance(completion[0], dict) and 'content' in completion[0]:
+                content_sample = completion[0]['content'][:50] + "..." if len(completion[0]['content']) > 50 else completion[0]['content']
+                print(f"Content preview: {content_sample}")
+    print(f"========== END COMPLETIONS DEBUG ==========\n")
     
     rewards = []
     print("Calculating rewards...")
     
     for i, completion in enumerate(completions):
-        content = completion[0]["content"]
+        # Check what we're getting and extract content safely
+        if isinstance(completion, list) and len(completion) > 0 and isinstance(completion[0], dict) and 'content' in completion[0]:
+            content = completion[0]["content"]
+        else:
+            print(f"WARNING: Unexpected completion format: {completion}")
+            content = str(completion)  # Try to convert to string
         
-        # Use the Verdict evaluation function directly
+        # Use GPT-4o-mini evaluation function with debugging information
+        print(f"\n----- Evaluating Completion {i+1}/{len(completions)} -----")
         score = evaluate_diagnosis(
             response=content,
             disease_info=disease_info[0],
-            verbose=False
+            verbose=True  # Enable verbose mode for debugging
         )
         
         # Add the score
