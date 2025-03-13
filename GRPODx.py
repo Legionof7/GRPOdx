@@ -14,24 +14,20 @@ This implements a diagnostic agent that:
 
 import json
 import os
-import random
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 # Import unsloth first as recommended
 from unsloth import FastLanguageModel
 import openai
-import torch
 from datasets import Dataset
 from trl import GRPOConfig, GRPOTrainer
-from transformers import Trainer, TrainingArguments, DataCollatorForLanguageModeling
 from vllm import SamplingParams
 
-# Standard environment setup for GRPO with Phi-4
-import os
 # No need for special Gemma-specific settings with Phi-4
 
 print("Using standard configuration for Phi-4 with GRPO")
+
 
 # Simple function for model name handling
 def ensure_eager_attention(model_name):
@@ -90,7 +86,8 @@ Be creative and generate unusual or rare diseases occasionally.
 Include some interesting edge cases and complex conditions.
 Do not include any explanatory text, ONLY return the JSON object."""
 
-        user_message = "Generate a random disease with realistic symptoms and indicate which symptoms are present (true) or absent (false). Be creative and include rare or unusual conditions."
+        user_message = ("Generate a random disease with realistic symptoms and indicate which symptoms "
+                        "are present (true) or absent (false). Be creative and include rare or unusual conditions.")
         
         # Updated OpenAI API call for v1.0.0+
         response = openai.chat.completions.create(
@@ -166,7 +163,7 @@ Be realistic and provide plausible answers a real patient might give.
 Add appropriate details that would be consistent with your condition.
 Do not directly state your diagnosis, but describe your symptoms clearly.
 Keep your responses relatively brief (1-3 sentences).
-""",
+"""
             }
         ]
 
@@ -631,7 +628,8 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
                 # Extract reasoning
                 reasoning_match = re.search(r"<reasoning>(.*?)</reasoning>", response, re.DOTALL)
                 if reasoning_match:
-                    reasoning = reasoning_match.group(1).strip()
+                    # Store reasoning but not used in this simplified function
+                    pass
                 
                 # Calculate basic reward
                 reward = 0.1  # Base reward
@@ -766,7 +764,7 @@ Your final diagnosis here
     
     # Initial prompt from patient
     patient_initial = "Doctor, I'm not feeling well today."
-    print(f"Patient's Initial Message:")
+    print("Patient's Initial Message:")
     print(f"{patient_initial}")
     conversation.append({"role": "user", "content": patient_initial})
     
@@ -793,12 +791,12 @@ Your final diagnosis here
         conversation.append({"role": "assistant", "content": response})
         
         # Display doctor's full response (with reasoning) for the user
-        print(f"Doctor's Full Response (including internal reasoning):")
+        print("Doctor's Full Response (including internal reasoning):")
         print(f"{response}")
         
         # Show what the patient actually sees (cleaned message)
         clean_response = patient._clean_doctor_message(response)
-        print(f"\nWhat the patient actually sees:")
+        print("\nWhat the patient actually sees:")
         print(f"{clean_response}")
         
         # Check if final diagnosis was given
@@ -828,7 +826,7 @@ Your final diagnosis here
         
         # Get patient's response
         patient_response = patient.answer_question(response)
-        print(f"\nPatient's Response:")
+        print("\nPatient's Response:")
         print(f"{patient_response}")
         conversation.append({"role": "user", "content": patient_response})
         
@@ -1200,7 +1198,7 @@ Your final diagnosis here
                     conversation.append({"role": "user", "content": patient_response})
                     
                     # Print patient's response
-                    print(f"\nPatient's Response:")
+                    print("\nPatient's Response:")
                     print(f"{patient_response}")
                 
                 # Calculate reward for this demonstration
