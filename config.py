@@ -8,18 +8,18 @@ This file contains configuration parameters that can be modified to customize th
 MODEL_CONFIG = {
     # Base model to use - will attempt these models in order until one works
     "model_options": [
-        "unsloth/Llama-3.3-70B-Instruct-GGUF",    # Primary 70B model (GGUF format)
-        "meta-llama/meta-Llama-3.1-8B-Instruct",  # Fallback - Llama 3.1 8B
-        "unsloth/Llama-3.1-8B-Instruct",          # Unsloth mirror
-        "unsloth/llama-3-8b-instruct",            # Alternative naming
-        "Qwen/Qwen2-7B-Instruct",                 # Qwen alternative
-        "mistralai/Mistral-7B-Instruct-v0.2",     # Mistral alternative
-        "meta-llama/Llama-2-7b-chat-hf",          # Llama 2 fallback
-        "unsloth/Qwen2.5-1.5B-Instruct"           # Smallest model option
+        "unsloth/Llama-3.3-70B-Instruct-bnb-4bit", # Primary 70B model (BNB 4-bit format)
+        "meta-llama/meta-Llama-3.1-8B-Instruct",   # Fallback - Llama 3.1 8B
+        "unsloth/Llama-3.1-8B-Instruct",           # Unsloth mirror
+        "unsloth/llama-3-8b-instruct",             # Alternative naming
+        "Qwen/Qwen2-7B-Instruct",                  # Qwen alternative
+        "mistralai/Mistral-7B-Instruct-v0.2",      # Mistral alternative
+        "meta-llama/Llama-2-7b-chat-hf",           # Llama 2 fallback
+        "unsloth/Qwen2.5-1.5B-Instruct"            # Smallest model option
     ],
     
     # Legacy model name for backwards compatibility
-    "model_name": "unsloth/Llama-3.3-70B-Instruct-GGUF",
+    "model_name": "unsloth/Llama-3.3-70B-Instruct-bnb-4bit",
     
     # Model parameters
     "max_seq_length": 4096,  # Increased from 2048 to allow longer conversations
