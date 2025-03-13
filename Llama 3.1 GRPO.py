@@ -237,11 +237,30 @@ sampling_params = SamplingParams(
     top_p = 0.95,
     max_tokens = 1024,
 )
-output = model.fast_generate(
-    [text],
-    sampling_params = sampling_params,
-    lora_request = None,
-)[0].outputs[0].text
+# This is a reference example file - not used in production
+try:
+    # Use fast_generate if available
+    if hasattr(model, 'fast_generate'):
+        output = model.fast_generate(
+            [text],
+            sampling_params = sampling_params,
+            lora_request = None,
+        )[0].outputs[0].text
+    else:
+        raise AttributeError("Model doesn't have fast_generate")
+except (AttributeError, RuntimeError) as e:
+    print(f"Falling back to standard generate: {e}")
+    import torch
+    inputs = tokenizer(text, return_tensors="pt").to(model.device)
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=1024,
+            temperature=0.8,
+            top_p=0.95,
+            do_sample=True,
+        )
+    output = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
 
 output
 
