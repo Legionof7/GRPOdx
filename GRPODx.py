@@ -617,55 +617,212 @@ Grade the doctor's response from 0.0 to 1.0:"""
         print("============ END EVALUATION ============\n")
 
 def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[float]:
-    """Simple GRPO reward function that uses GPT-4o-mini for evaluation.
+    """Multi-turn GRPO reward function that simulates full diagnostic conversations.
 
     Args:
         prompts: Input prompts
-        completions: Model completions
+        completions: Model initial completions (first doctor response)
         disease_info: Actual disease information
 
     Returns:
         List of reward values between 0 and 1
     """
-    print("Using GPT-4o-mini for evaluation")
+    import torch
+    from vllm import SamplingParams
     
-    rewards = []
+    # Access the model and tokenizer from kwargs
+    model = kwargs.get("model")
+    tokenizer = kwargs.get("tokenizer")
+    max_turns = 3  # Number of conversation turns to simulate
     
-    # Log the prompts for debugging
-    print(f"\n========== CONVERSATION CONTEXT ==========")
+    if model is None or tokenizer is None:
+        print("WARNING: Cannot run multi-turn conversations without model and tokenizer")
+        # Fall back to single-turn evaluation
+        return [evaluate_diagnosis(c[0]["content"], disease_info[0]) for c in completions]
+    
+    print(f"\n========== RUNNING {len(completions)} MULTI-TURN DIAGNOSTIC CONVERSATIONS ==========")
     print(f"Disease: {disease_info[0]['disease_name']}")
     print(f"Symptoms present: {', '.join([s for s, v in disease_info[0]['symptoms'].items() if v])}")
     print(f"Symptoms absent: {', '.join([s for s, v in disease_info[0]['symptoms'].items() if not v])}")
     
-    if isinstance(prompts, list) and len(prompts) > 0:
-        prompt_preview = prompts[0][-200:] if len(prompts[0]) > 200 else prompts[0]
-        print(f"Prompt context preview: {prompt_preview}...")
-    print(f"========== END CONTEXT ==========\n")
+    rewards = []
     
     for i, completion in enumerate(completions):
-        # Check what we're getting and extract content safely
+        print(f"\n{'#'*80}")
+        print(f"DIAGNOSTIC CONVERSATION {i+1}/{len(completions)}")
+        print(f"{'#'*80}\n")
+        
+        # Extract the initial doctor response
         if isinstance(completion, list) and len(completion) > 0 and isinstance(completion[0], dict) and 'content' in completion[0]:
-            content = completion[0]["content"]
+            initial_response = completion[0]["content"]
         else:
             print(f"WARNING: Unexpected completion format: {completion}")
-            content = str(completion)  # Try to convert to string
+            initial_response = str(completion)
+            
+        # Create patient agent for this conversation
+        patient = PatientAgent(disease_info[0], use_llm=True)
         
-        # Log the full completion for debugging
-        print(f"\n========== COMPLETION {i+1}/{len(completions)} ==========")
-        print(content)
-        print(f"========== END COMPLETION {i+1} ==========\n")
+        # Get the system prompt from the initial prompt
+        system_prompt = ""
+        if isinstance(prompts, list) and len(prompts) > 0:
+            prompt_parts = prompts[0].split("<|assistant|>")[0].strip()
+            system_match = re.search(r"<\|system\|>\s*(.*?)(?=<\|user\|>)", prompt_parts, re.DOTALL)
+            if system_match:
+                system_prompt = system_match.group(1).strip()
         
-        # Use GPT-4o-mini evaluation function with debugging information
-        print(f"Evaluating completion {i+1}/{len(completions)}")
-        score = evaluate_diagnosis(
-            response=content,
-            disease_info=disease_info[0],
-            verbose=True  # Enable verbose mode for debugging
-        )
+        # Initialize conversation with system prompt
+        conversation = [
+            {"role": "system", "content": system_prompt or """You are an expert medical diagnostician. 
+Your goal is to determine the patient's condition by asking relevant questions.
+After gathering sufficient information, provide your final diagnosis.
+
+When you're ready to give your diagnosis, format it as:
+Final diagnosis: [your diagnosis]
+
+Format your reasoning as:
+<reasoning>
+Your step-by-step diagnostic reasoning here...
+</reasoning>
+
+Format your final answer as:
+<answer>
+Your final diagnosis here
+</answer>"""},
+            {"role": "user", "content": "Doctor, I'm not feeling well today."},
+            {"role": "assistant", "content": initial_response}
+        ]
+        
+        print(f"TURN 0 - PATIENT: Doctor, I'm not feeling well today.")
+        print(f"TURN 1 - DOCTOR: {initial_response}")
+        
+        # Get patient's first response to the doctor
+        patient_response = patient.answer_question(initial_response)
+        conversation.append({"role": "user", "content": patient_response})
+        
+        # Show what the patient actually sees
+        clean_response = patient._clean_doctor_message(initial_response)
+        print(f"\nWhat the patient sees: {clean_response}")
+        print(f"Patient responds: {patient_response}")
+        
+        # Main conversation loop for additional turns
+        final_diagnosis = None
+        
+        for turn in range(2, max_turns + 1):
+            print(f"\n{'='*20} TURN {turn} {'='*20}")
+            
+            # Generate doctor's next response
+            prompt = tokenizer.apply_chat_template(
+                conversation, tokenize=False, add_generation_prompt=True
+            )
+            
+            # Set up sampling parameters
+            sampling_params = SamplingParams(
+                temperature=1.2,
+                top_p=0.95,
+                max_tokens=256,
+            )
+            
+            # Generate response
+            try:
+                response = model.fast_generate(
+                    prompt, sampling_params=sampling_params
+                )[0].outputs[0].text
+                
+                # Add to conversation
+                conversation.append({"role": "assistant", "content": response})
+                print(f"DOCTOR: {response}")
+                
+                # Check if final diagnosis is provided
+                if "final diagnosis:" in response.lower():
+                    # Extract the diagnosis
+                    diagnosis_match = re.search(r"final diagnosis:\s*([^.\n]+)", response.lower())
+                    if diagnosis_match:
+                        final_diagnosis = diagnosis_match.group(1).strip()
+                        print(f"\nFINAL DIAGNOSIS FOUND: {final_diagnosis}")
+                    else:
+                        # Try from <answer> tag
+                        answer_match = re.search(r"<answer>\s*([^<]+)", response)
+                        if answer_match:
+                            final_diagnosis = answer_match.group(1).strip()
+                            print(f"\nFINAL DIAGNOSIS FOUND IN <answer> TAG: {final_diagnosis}")
+                    break
+                
+                # Get patient response if not the last turn and no diagnosis yet
+                if turn < max_turns:
+                    patient_response = patient.answer_question(response)
+                    conversation.append({"role": "user", "content": patient_response})
+                    
+                    # Show what the patient sees
+                    clean_response = patient._clean_doctor_message(response)
+                    print(f"\nWhat the patient sees: {clean_response}")
+                    print(f"Patient responds: {patient_response}")
+            
+            except Exception as e:
+                print(f"Error generating doctor response: {e}")
+                break
+        
+        # If no diagnosis was made, force one in the final turn
+        if final_diagnosis is None:
+            print(f"\n{'='*20} FINAL TURN - REQUESTING DIAGNOSIS {'='*20}")
+            
+            # Add request for diagnosis
+            conversation.append({"role": "user", "content": "Please provide your final diagnosis now."})
+            
+            # Generate final response
+            prompt = tokenizer.apply_chat_template(
+                conversation, tokenize=False, add_generation_prompt=True
+            )
+            
+            try:
+                sampling_params = SamplingParams(
+                    temperature=1.0,
+                    top_p=0.95,
+                    max_tokens=256,
+                )
+                
+                final_response = model.fast_generate(
+                    prompt, sampling_params=sampling_params
+                )[0].outputs[0].text
+                
+                conversation.append({"role": "assistant", "content": final_response})
+                print(f"PATIENT: Please provide your final diagnosis now.")
+                print(f"DOCTOR: {final_response}")
+                
+                # Extract diagnosis
+                diagnosis_match = re.search(r"final diagnosis:\s*([^.\n]+)", final_response.lower())
+                if diagnosis_match:
+                    final_diagnosis = diagnosis_match.group(1).strip()
+                    print(f"\nFINAL DIAGNOSIS FOUND: {final_diagnosis}")
+                else:
+                    answer_match = re.search(r"<answer>\s*([^<]+)", final_response)
+                    if answer_match:
+                        final_diagnosis = answer_match.group(1).strip()
+                        print(f"\nFINAL DIAGNOSIS FOUND IN <answer> TAG: {final_diagnosis}")
+                    else:
+                        final_diagnosis = "No clear diagnosis provided"
+                        print("\nNO CLEAR DIAGNOSIS PROVIDED")
+            
+            except Exception as e:
+                print(f"Error generating final diagnosis: {e}")
+                final_diagnosis = "Error in diagnosis generation"
+        
+        # Calculate the reward for this conversation
+        if final_diagnosis:
+            # Get the last response with the diagnosis
+            final_response = conversation[-1]["content"]
+            score = evaluate_diagnosis(final_response, disease_info[0], verbose=True)
+        else:
+            score = 0.0  # No diagnosis means zero reward
         
         # Add the score
         rewards.append(score)
-        print(f"Reward {i+1}/{len(completions)}: {score:.2f}")
+        
+        print(f"\n{'='*40}")
+        print(f"CONVERSATION {i+1} SUMMARY")
+        print(f"Actual disease: {disease_info[0]['disease_name']}")
+        print(f"Final diagnosis: {final_diagnosis or 'None'}")
+        print(f"Reward: {score:.2f}")
+        print(f"{'='*40}\n")
     
     return rewards
 
@@ -1000,6 +1157,7 @@ class OnlineGRPOTrainer:
             report_to="none",
             output_dir=self.output_dir,
             # Using relative rewards as the default GRPO approach
+            pass_model_to_reward=True,  # Pass model to reward function for multi-turn conversations
         )
         
         # Track progress
@@ -1297,6 +1455,7 @@ def main():
                 report_to="none",
                 output_dir=OUTPUT_DIR,
                 # Using relative rewards as the default GRPO approach
+                pass_model_to_reward=True,  # Pass model to reward function for multi-turn conversations
             )
 
             # Create GRPO trainer
