@@ -269,23 +269,56 @@ def extract_diagnosis(text):
         except:
             return None
     
-    # Search for diagnosis pattern
+    # Search for diagnosis pattern - primary format we want
     try:
-        diagnosis_pattern = r"Final diagnosis: ([A-Za-z\s\-]+)"
+        diagnosis_pattern = r"Final diagnosis: ([A-Za-z\s\-\.,']+)"
         match = re.search(diagnosis_pattern, text)
         if match:
-            return match.group(1).strip()
+            diagnosis = match.group(1).strip()
+            # Filter out vague non-diagnoses that start with "of a" or "a"
+            if diagnosis.lower().startswith(("of a", "a ", "of ")):
+                # This is likely a description, not a specific disease name
+                # Try to find the actual disease name in the text
+                disease_name = None
+                words = diagnosis.split()
+                for i, word in enumerate(words):
+                    # Look for capitalized words after the initial "of a" or "a"
+                    if i > 1 and word and word[0].isupper():
+                        disease_name = " ".join(words[i:])
+                        break
+                
+                if disease_name:
+                    return disease_name.strip()
+                # Otherwise, return the original but with a note that it's not ideal
+                print(f"Warning: Vague diagnosis format detected: '{diagnosis}'")
+                return diagnosis
+            return diagnosis
     except Exception as e:
         print(f"Warning: Error extracting diagnosis: {e}")
     
-    # Alternative pattern in case the format is different
+    # Alternative patterns in case the format is different
     try:
-        alt_pattern = r"diagnosis:?\s*([A-Za-z\s\-]+)"
-        match = re.search(alt_pattern, text, re.IGNORECASE)
+        # Look for "diagnosis is X" pattern
+        alt_pattern1 = r"diagnosis is ([A-Za-z\s\-\.,']+)"
+        match = re.search(alt_pattern1, text, re.IGNORECASE)
         if match:
             return match.group(1).strip()
-    except:
-        pass
+            
+        # Look for just "diagnosis: X" pattern
+        alt_pattern2 = r"diagnosis:?\s*([A-Za-z\s\-\.,']+)"
+        match = re.search(alt_pattern2, text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+            
+        # If all else fails, look for capitalized words together that might be a disease name
+        # This is a fallback for when the format is completely wrong
+        caps_pattern = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)'
+        matches = re.findall(caps_pattern, text)
+        if matches:
+            # Return the longest match as it's most likely to be a disease name
+            return max(matches, key=len)
+    except Exception as e:
+        print(f"Warning: Error in alternative diagnosis extraction: {e}")
     
     return None
 
