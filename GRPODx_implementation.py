@@ -601,19 +601,42 @@ def calculate_verdict_reward(diagnosis, disease_info, conversation, num_turns=0)
         A reward score from 0 to 1
     """
     try:
-        # Ensure the current directory isn't interfering with imports
+        # DEBUGGING: Print Python version and path
         import sys
+        print(f"Python version: {sys.version}")
+        print(f"Python path: {sys.path}")
+        
+        # Check for local verdict.py or verdict_example.py files that might conflict
+        import os
+        cwd = os.getcwd()
+        local_files = os.listdir(cwd)
+        print(f"Files in current directory: {local_files}")
+        verdict_files = [f for f in local_files if 'verdict' in f.lower()]
+        if verdict_files:
+            print(f"WARNING: Found local verdict files that may conflict with imports: {verdict_files}")
+        
+        # Ensure the current directory isn't interfering with imports
         current_dir = ''
         if current_dir in sys.path:
             # Temporarily remove current directory from path to avoid local imports
+            print("Removing current directory from sys.path to avoid local imports")
             sys.path.remove(current_dir)
             
         # Check if verdict is installed and API keys are available
         import importlib.util
-        verdict_spec = importlib.util.find_spec("verdict")
+        try:
+            verdict_spec = importlib.util.find_spec("verdict")
+            print(f"Verdict spec found: {verdict_spec}")
+            if verdict_spec:
+                print(f"Verdict origin: {verdict_spec.origin}")
+                print(f"Verdict submodule_search_locations: {verdict_spec.submodule_search_locations}")
+        except Exception as e:
+            print(f"Error checking for verdict module: {e}")
+            verdict_spec = None
         
         # Restore path if we modified it
         if current_dir not in sys.path:
+            print("Restoring current directory to sys.path")
             sys.path.insert(0, current_dir)
             
         if verdict_spec is None:
@@ -623,7 +646,6 @@ def calculate_verdict_reward(diagnosis, disease_info, conversation, num_turns=0)
             return calculate_traditional_reward(diagnosis, disease_info, [])
             
         # Check for API key in environment variables
-        import os
         if not os.environ.get("OPENAI_API_KEY"):
             print("WARNING: OpenAI API key not found in environment")
             print("Please set your key: export OPENAI_API_KEY='your-api-key'")
@@ -633,23 +655,48 @@ def calculate_verdict_reward(diagnosis, disease_info, conversation, num_turns=0)
         # Import verdict modules directly from the installed package
         try:    
             # Use absolute imports to avoid the local verdict.py file
+            print("Attempting to import verdict modules...")
+            print("First importing the main verdict module")
             import verdict
+            print(f"Successfully imported verdict main module")
+            
+            print("Now importing specific verdict modules")
             from verdict import Pipeline, Layer
+            print("Imported Pipeline and Layer")
+            
             from verdict.common.judge import CategoricalJudgeUnit
+            print("Imported CategoricalJudgeUnit")
+            
             from verdict.scale import DiscreteScale
+            print("Imported DiscreteScale")
+            
             from verdict.transform import MaxPoolUnit
+            print("Imported MaxPoolUnit")
+            
             from verdict.schema import Schema
-            print(f"Successfully imported verdict version: {getattr(verdict, '__version__', 'unknown')}")
+            print("Imported Schema")
+            
+            print(f"Successfully imported all verdict modules, version: {getattr(verdict, '__version__', 'unknown')}")
         except ImportError as e:
             print(f"Error importing verdict modules: {e}")
+            # Print traceback for more debugging info
+            import traceback
+            print("Full traceback:")
+            traceback.print_exc()
             return calculate_traditional_reward(diagnosis, disease_info, [])
         
         # Disable rate limiting for local testing
         try:
+            print("Trying to import and disable rate limit...")
             from verdict.util import ratelimit
+            print("Successfully imported ratelimit")
             ratelimit.disable()
+            print("Successfully disabled rate limiting")
         except ImportError as e:
             print(f"Failed to import ratelimit module: {e}")
+            import traceback
+            print("Full traceback for ratelimit import error:")
+            traceback.print_exc()
             # Continue without disabling rate limiting
         
         # Use GPT-4o for better diagnostic evaluation and direct scoring
@@ -771,6 +818,9 @@ def calculate_verdict_reward(diagnosis, disease_info, conversation, num_turns=0)
     except Exception as e:
         # Fall back to traditional reward calculation if verdict fails
         print(f"Verdict reward calculation failed: {e}")
+        print("Detailed exception information:")
+        import traceback
+        traceback.print_exc()
         print("Falling back to traditional reward calculation.")
         return calculate_traditional_reward(diagnosis, disease_info, [])
 
