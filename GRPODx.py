@@ -924,6 +924,260 @@ Your final diagnosis here
     return Dataset.from_list(data)
 
 
+class OnlineGRPOTrainer:
+    """Online GRPO Trainer that generates disease scenarios on-the-fly during training."""
+    
+    def __init__(self, model, tokenizer, lora_adapter=None, max_steps=300, batch_size=8, 
+                 num_generations=8, max_turns=5, use_gpt_patient=True, output_dir="outputs"):
+        """Initialize the online GRPO trainer.
+        
+        Args:
+            model: The base model to train
+            tokenizer: The tokenizer for the model
+            lora_adapter: Optional LoRA adapter (for inference)
+            max_steps: Maximum number of training steps
+            batch_size: Batch size (must be divisible by num_generations)
+            num_generations: Number of completions to generate per prompt
+            max_turns: Maximum number of turns in doctor-patient conversation
+            use_gpt_patient: Whether to use GPT-4o-mini for patient responses
+            output_dir: Directory to save model checkpoints
+        """
+        self.model = model
+        self.tokenizer = tokenizer
+        self.lora_adapter = lora_adapter
+        self.max_steps = max_steps
+        self.batch_size = batch_size
+        self.num_generations = num_generations
+        self.max_turns = max_turns
+        self.use_gpt_patient = use_gpt_patient
+        self.output_dir = output_dir
+        
+        # Verify batch size is divisible by num_generations
+        if self.batch_size % self.num_generations != 0:
+            print(f"Warning: batch_size ({self.batch_size}) should be divisible by num_generations ({self.num_generations})")
+            self.batch_size = self.num_generations
+            print(f"Setting batch_size to {self.batch_size}")
+        
+        # Configure GRPO training
+        self.training_args = GRPOConfig(
+            learning_rate=5e-6,
+            adam_beta1=0.9,
+            adam_beta2=0.99,
+            weight_decay=0.1,
+            warmup_ratio=0.1,
+            lr_scheduler_type="cosine",
+            optim="paged_adamw_8bit",
+            logging_steps=1,
+            per_device_train_batch_size=self.batch_size,
+            gradient_accumulation_steps=4,
+            num_generations=self.num_generations,
+            max_prompt_length=512,
+            max_completion_length=MAX_SEQ_LENGTH - 512,
+            max_steps=1,  # Train for 1 step at a time for online learning
+            save_steps=50,
+            max_grad_norm=0.1,
+            report_to="none",
+            output_dir=self.output_dir,
+        )
+        
+        # Track progress
+        self.current_step = 0
+        self.total_reward = 0.0
+        self.best_reward = 0.0
+        
+    def _generate_episode_data(self):
+        """Generate a new disease scenario and initial prompt for training."""
+        # Generate a new random disease
+        disease = generate_disease()
+        print("\n" + "="*60)
+        print(f"GENERATED DISEASE: {disease['disease_name']}")
+        print(f"Description: {disease.get('description', 'No description')}")
+        print(f"Symptoms present: {', '.join([s for s, v in disease['symptoms'].items() if v])}")
+        print(f"Symptoms absent: {', '.join([s for s, v in disease['symptoms'].items() if not v])}")
+        print("="*60 + "\n")
+        
+        # Create initial prompt
+        prompt = [
+            {
+                "role": "system",
+                "content": """You are an expert medical diagnostician. 
+Your goal is to determine the patient's condition by asking relevant questions.
+After gathering sufficient information, provide your final diagnosis.
+
+When you're ready to give your diagnosis, format it as:
+Final diagnosis: [your diagnosis]
+
+Format your reasoning as:
+<reasoning>
+Your step-by-step diagnostic reasoning here...
+</reasoning>
+
+Format your final answer as:
+<answer>
+Your final diagnosis here
+</answer>""",
+            },
+            {"role": "user", "content": "Doctor, I'm not feeling well today."},
+        ]
+        
+        return {"prompt": prompt, "disease_info": disease}
+        
+    def _display_conversation_turn(self, doctor_msg, patient_msg, turn_num):
+        """Display a single turn of doctor-patient conversation."""
+        print(f"\n{'='*20} TURN {turn_num} {'='*20}")
+        
+        # Display doctor's message
+        print("Doctor: " + doctor_msg)
+        
+        # Display patient's response if provided
+        if patient_msg:
+            print("\nPatient: " + patient_msg)
+    
+    def train(self, save_path=None):
+        """Run online GRPO training, generating scenarios on-the-fly."""
+        print("Starting online GRPO training...")
+        
+        while self.current_step < self.max_steps:
+            # Generate new episode data
+            print(f"\nStep {self.current_step + 1}/{self.max_steps}")
+            print("Generating new disease scenario...")
+            episode_data = self._generate_episode_data()
+            
+            # Create a one-example dataset
+            train_dataset = Dataset.from_list([episode_data])
+            
+            # Create a GRPO trainer for this step
+            trainer = GRPOTrainer(
+                model=self.model,
+                processing_class=self.tokenizer,
+                reward_funcs=[
+                    grpo_reward_function,  # Primary diagnostic correctness reward
+                    format_reward_function,  # Format adherence reward
+                ],
+                args=self.training_args,
+                train_dataset=train_dataset,
+            )
+            
+            # Run a single training step
+            print("Running training step...")
+            train_output = trainer.train()
+            
+            # Extract and display the average reward for this step
+            step_reward = train_output.metrics.get("train_reward", 0.0)
+            self.total_reward += step_reward
+            avg_reward = self.total_reward / (self.current_step + 1)
+            
+            print(f"Step reward: {step_reward:.4f}, Average reward: {avg_reward:.4f}")
+            
+            # Simulate and show a doctor-patient conversation with current model
+            if (self.current_step + 1) % 10 == 0 or self.current_step == 0:
+                print("\n" + "="*60)
+                print("DEMONSTRATING CURRENT MODEL CAPABILITIES")
+                print("="*60)
+                
+                # Run a full conversation with the current model
+                disease_info = episode_data["disease_info"]
+                patient = PatientAgent(disease_info, use_llm=self.use_gpt_patient)
+                
+                # Initialize conversation
+                conversation = [
+                    {"role": "system", "content": episode_data["prompt"][0]["content"]},
+                    {"role": "user", "content": "Doctor, I'm not feeling well today."},
+                ]
+                
+                # Show the initial patient statement
+                print("\nPatient: Doctor, I'm not feeling well today.")
+                
+                # Run conversation for several turns
+                final_diagnosis = None
+                for turn in range(self.max_turns):
+                    # Get doctor's response
+                    prompt = self.tokenizer.apply_chat_template(
+                        conversation, tokenize=False, add_generation_prompt=True
+                    )
+                    
+                    # Generate doctor's response
+                    sampling_params = SamplingParams(
+                        temperature=0.7,
+                        top_p=0.95,
+                        max_tokens=256,
+                    )
+                    
+                    response = (
+                        self.model.fast_generate(
+                            prompt, sampling_params=sampling_params, lora_request=self.lora_adapter
+                        )[0]
+                        .outputs[0]
+                        .text
+                    )
+                    
+                    # Add doctor's response to conversation
+                    conversation.append({"role": "assistant", "content": response})
+                    
+                    # Display what the patient sees (cleaned message)
+                    clean_response = patient._clean_doctor_message(response)
+                    
+                    self._display_conversation_turn(
+                        doctor_msg=f"{response}",
+                        patient_msg="",
+                        turn_num=turn+1
+                    )
+                    
+                    print("\nWhat the patient actually sees:")
+                    print(f"{clean_response}")
+                    
+                    # Check if final diagnosis was given
+                    if "final diagnosis:" in response.lower():
+                        # Extract the diagnosis
+                        diagnosis_match = re.search(
+                            r"final diagnosis:\s*([^.\n]+)", response.lower()
+                        )
+                        if diagnosis_match:
+                            final_diagnosis = diagnosis_match.group(1).strip()
+                        else:
+                            # Try to extract from the <answer> tag
+                            answer_match = re.search(r"<answer>\s*([^<]+)", response)
+                            if answer_match:
+                                final_diagnosis = answer_match.group(1).strip()
+                        break
+                    
+                    # Get patient's response
+                    patient_response = patient.answer_question(response)
+                    conversation.append({"role": "user", "content": patient_response})
+                    
+                    # Print patient's response
+                    print(f"\nPatient's Response:")
+                    print(f"{patient_response}")
+                
+                # Calculate reward for this demonstration
+                if final_diagnosis:
+                    reward = calculate_reward(final_diagnosis, disease_info)
+                    print(f"\nFinal diagnosis: {final_diagnosis}")
+                    print(f"Actual disease: {disease_info['disease_name']}")
+                    print(f"Reward: {reward:.2f}/1.00")
+                else:
+                    print("\nNo final diagnosis provided")
+            
+            # Save model checkpoint
+            if (self.current_step + 1) % 50 == 0 and save_path:
+                checkpoint_path = f"{save_path}_step{self.current_step+1}"
+                print(f"Saving checkpoint to {checkpoint_path}...")
+                self.model.save_lora(checkpoint_path)
+            
+            # Increment step counter
+            self.current_step += 1
+        
+        # Save final model
+        if save_path:
+            print(f"Saving final model to {save_path}...")
+            self.model.save_lora(save_path)
+        
+        print("Online GRPO training complete!")
+        print(f"Average reward: {self.total_reward / self.max_steps:.4f}")
+        
+        return self.model
+
+
 def main():
     """Main training pipeline."""
     import argparse
@@ -943,6 +1197,8 @@ def main():
         action="store_true",
         help="Use GPT-4o-mini for patient simulation",
     )
+    parser.add_argument("--online", action="store_true", help="Use online GRPO training")
+    parser.add_argument("--steps", type=int, default=MAX_STEPS, help="Number of training steps")
     parser.add_argument("--num-tests", type=int, default=5, help="Number of test cases")
     parser.add_argument(
         "--model-path",
@@ -954,8 +1210,9 @@ def main():
     args = parser.parse_args()
 
     # If no arguments provided, default to training
-    if not (args.train or args.test or args.interact):
+    if not (args.train or args.test or args.interact or args.simulate):
         args.train = True
+        args.online = True  # Default to online training
 
     # Load model and tokenizer
     print("Loading model and tokenizer...")
@@ -988,53 +1245,70 @@ def main():
             random_state=42,
         )
 
-        # Create training dataset
-        print("Creating training dataset...")
-        dataset = create_training_dataset(num_samples=100)
+        if args.online:
+            # Use online GRPO training (generates scenarios on-the-fly)
+            trainer = OnlineGRPOTrainer(
+                model=model,
+                tokenizer=tokenizer,
+                max_steps=args.steps,
+                batch_size=BATCH_SIZE,
+                num_generations=NUM_GENERATIONS,
+                max_turns=5,
+                use_gpt_patient=args.use_gpt_patient or True,
+                output_dir=OUTPUT_DIR
+            )
+            
+            # Run online training
+            trainer.train(save_path=args.model_path)
+        else:
+            # Use traditional batch GRPO training
+            # Create training dataset
+            print("Creating training dataset...")
+            dataset = create_training_dataset(num_samples=100)
 
-        # Configure GRPO training
-        print("Configuring GRPO trainer...")
-        training_args = GRPOConfig(
-            learning_rate=5e-6,
-            adam_beta1=0.9,
-            adam_beta2=0.99,
-            weight_decay=0.1,
-            warmup_ratio=0.1,
-            lr_scheduler_type="cosine",
-            optim="paged_adamw_8bit",
-            logging_steps=1,
-            per_device_train_batch_size=BATCH_SIZE,
-            gradient_accumulation_steps=GRAD_ACCUMULATION,
-            num_generations=NUM_GENERATIONS,
-            max_prompt_length=512,
-            max_completion_length=MAX_SEQ_LENGTH - 512,
-            max_steps=MAX_STEPS,
-            save_steps=100,
-            max_grad_norm=0.1,
-            report_to="none",
-            output_dir=OUTPUT_DIR,
-        )
+            # Configure GRPO training
+            print("Configuring GRPO trainer...")
+            training_args = GRPOConfig(
+                learning_rate=5e-6,
+                adam_beta1=0.9,
+                adam_beta2=0.99,
+                weight_decay=0.1,
+                warmup_ratio=0.1,
+                lr_scheduler_type="cosine",
+                optim="paged_adamw_8bit",
+                logging_steps=1,
+                per_device_train_batch_size=BATCH_SIZE,
+                gradient_accumulation_steps=GRAD_ACCUMULATION,
+                num_generations=NUM_GENERATIONS,
+                max_prompt_length=512,
+                max_completion_length=MAX_SEQ_LENGTH - 512,
+                max_steps=args.steps,
+                save_steps=100,
+                max_grad_norm=0.1,
+                report_to="none",
+                output_dir=OUTPUT_DIR,
+            )
 
-        # Create GRPO trainer
-        print("Creating GRPO trainer...")
-        trainer = GRPOTrainer(
-            model=model,
-            processing_class=tokenizer,
-            reward_funcs=[
-                grpo_reward_function,  # Primary diagnostic correctness reward
-                format_reward_function,  # Format adherence reward
-            ],
-            args=training_args,
-            train_dataset=dataset,
-        )
+            # Create GRPO trainer
+            print("Creating GRPO trainer...")
+            trainer = GRPOTrainer(
+                model=model,
+                processing_class=tokenizer,
+                reward_funcs=[
+                    grpo_reward_function,  # Primary diagnostic correctness reward
+                    format_reward_function,  # Format adherence reward
+                ],
+                args=training_args,
+                train_dataset=dataset,
+            )
 
-        # Run training
-        print("Starting GRPO training...")
-        trainer.train()
+            # Run training
+            print("Starting GRPO training...")
+            trainer.train()
 
-        # Save the final model
-        print(f"Saving model to {args.model_path}...")
-        model.save_lora(args.model_path)
+            # Save the final model
+            print(f"Saving model to {args.model_path}...")
+            model.save_lora(args.model_path)
 
         print("Training complete!")
 
