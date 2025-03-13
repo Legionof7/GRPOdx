@@ -43,7 +43,7 @@ def ensure_eager_attention(model_name):
 # ======================================================================
 
 # Model settings - using Phi-4 which has better GRPO compatibility
-MAX_SEQ_LENGTH = 2048  # Increased context window for longer conversations
+MAX_SEQ_LENGTH = 8192  # Significantly increased context window for much longer conversations
 LORA_RANK = 16  # Standard LoRA rank for Phi-4 as in the example
 MODEL_NAME = "unsloth/Phi-4"  # Phi-4 model (more compatible with GRPO)
 LOAD_IN_4BIT = True  # 4-bit quantization to fit in limited VRAM
@@ -304,7 +304,7 @@ def run_episode(
     tokenizer,
     lora_adapter,
     disease_info: Dict,
-    max_turns: int = 3,  # Reduced to prevent exceeding context length
+    max_turns: int = 10,  # Increased for more thorough diagnostic conversations
     use_gpt_patient: bool = True,
 ) -> Tuple[List[Dict], str, float]:
     """Run a single diagnostic conversation episode.
@@ -956,8 +956,8 @@ class OnlineGRPOTrainer:
             self.batch_size = self.num_generations
             print(f"Setting batch_size to {self.batch_size}")
         
-        # Phi-4 GRPO configuration with adjusted prompt length
-        max_prompt_length = 1024  # Increased to allow for longer conversations
+        # Phi-4 GRPO configuration with greatly increased prompt length
+        max_prompt_length = 4096  # Significantly increased to allow for much longer conversations
         
         self.training_args = GRPOConfig(
             learning_rate=5e-6,
@@ -1254,7 +1254,7 @@ def main():
             # Configure GRPO training
             print("Configuring GRPO trainer...")
             # Phi-4 GRPO configuration with adjusted prompt length
-            max_prompt_length = 1024  # Increased to allow for longer conversations
+            max_prompt_length = 4096  # Significantly increased to allow for much longer conversations
             
             training_args = GRPOConfig(
                 learning_rate=5e-6,
@@ -1306,7 +1306,7 @@ def main():
                 max_steps=args.steps,
                 batch_size=BATCH_SIZE,
                 num_generations=NUM_GENERATIONS,
-                max_turns=3,  # Reduced to prevent exceeding context length
+                max_turns=10,  # Increased for more thorough diagnostic conversations
                 use_gpt_patient=args.use_gpt_patient or True,
                 output_dir=OUTPUT_DIR
             )
