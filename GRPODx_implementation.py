@@ -287,7 +287,7 @@ def extract_diagnosis(text):
 from llm_patient import llm_patient_response, create_llm_patient
 
 # Episode simulation
-def run_episode(model, tokenizer, disease_info=None, max_turns=5, use_llm_patient=False):
+def run_episode(model, tokenizer, disease_info=None, max_turns=10, use_llm_patient=False):
     """
     Run a complete diagnostic episode
     
@@ -556,7 +556,7 @@ class TrainingCallback(TrainerCallback):
                 print("\nGENERATING TEST CONVERSATION...")
                 try:
                     conversation, diagnosis, reward, _ = run_episode(
-                        self.model, self.tokenizer, disease, max_turns=4,
+                        self.model, self.tokenizer, disease, max_turns=8,
                         use_llm_patient=self.use_llm_patient
                     )
                     
@@ -599,7 +599,7 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbos
         use_llm_patient: Whether to use the LLM-based patient simulator
     """
     # Set up model parameters
-    max_seq_length = 2048
+    max_seq_length = 4096  # Increased from 2048 to allow longer conversations
     lora_rank = 8
     
     # Create a global disease cache that can be shared with reward functions
@@ -648,7 +648,7 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbos
     )
     
     # Prepare GRPO configuration
-    max_prompt_length = 512
+    max_prompt_length = 1024  # Increased from 512 to allow more context in prompts
     
     training_args = GRPOConfig(
         learning_rate=5e-6,

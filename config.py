@@ -20,7 +20,7 @@ MODEL_CONFIG = {
     "model_name": "meta-llama/meta-Llama-3.1-8B-Instruct",
     
     # Model parameters
-    "max_seq_length": 2048,
+    "max_seq_length": 4096,  # Increased from 2048 to allow longer conversations
     "load_in_4bit": True,  # Set to False for 16-bit training (higher VRAM usage)
     "fast_inference": True,
     
@@ -47,17 +47,17 @@ TRAINING_CONFIG = {
     "logging_steps": 1,
     "per_device_train_batch_size": 1,
     "gradient_accumulation_steps": 1,
-    "max_prompt_length": 512,
+    "max_prompt_length": 1024,  # Increased from 512 to allow more context in prompts
     "max_grad_norm": 0.1,
     "output_dir": "outputs",
 }
 
 # Diagnostic Configuration
 DIAGNOSTIC_CONFIG = {
-    "max_turns": 8,
+    "max_turns": 12,  # Increased from 8 to allow more conversation turns
     "temperature": 0.7,
     "top_p": 0.95,
-    "max_tokens": 512,
+    "max_tokens": 768,  # Increased from 512 to allow longer responses
 }
 
 # System Prompt (can be customized)
