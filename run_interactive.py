@@ -38,6 +38,7 @@ def main():
                 load_in_4bit=MODEL_CONFIG["load_in_4bit"],
                 fast_inference=MODEL_CONFIG["fast_inference"],
                 max_lora_rank=lora_rank,
+                gpu_memory_utilization=MODEL_CONFIG.get("gpu_memory_utilization", 0.9),
             )
             print(f"Successfully loaded: {model_name}")
             break

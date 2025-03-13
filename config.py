@@ -8,7 +8,8 @@ This file contains configuration parameters that can be modified to customize th
 MODEL_CONFIG = {
     # Base model to use - will attempt these models in order until one works
     "model_options": [
-        "meta-llama/meta-Llama-3.1-8B-Instruct",  # First choice
+        "unsloth/Llama-3.3-70B-Instruct-GGUF",    # Primary large model
+        "meta-llama/meta-Llama-3.1-8B-Instruct",  # Secondary choice
         "unsloth/Llama-3.1-8B-Instruct",          # Unsloth mirror
         "unsloth/llama-3-8b-instruct",            # Alternative naming
         "unsloth/Qwen2.5-7B-Instruct",            # Alternative model
@@ -17,12 +18,13 @@ MODEL_CONFIG = {
     ],
     
     # Legacy model name for backwards compatibility
-    "model_name": "meta-llama/meta-Llama-3.1-8B-Instruct",
+    "model_name": "unsloth/Llama-3.3-70B-Instruct-GGUF",
     
     # Model parameters
     "max_seq_length": 4096,  # Increased from 2048 to allow longer conversations
     "load_in_4bit": True,  # Set to False for 16-bit training (higher VRAM usage)
     "fast_inference": True,
+    "gpu_memory_utilization": 0.9,  # Increased for 70B model
     
     # LoRA parameters
     "lora_rank": 8,
@@ -37,7 +39,7 @@ MODEL_CONFIG = {
 
 # Training Configuration
 TRAINING_CONFIG = {
-    "learning_rate": 5e-6,
+    "learning_rate": 2e-6,        # Reduced for 70B model
     "adam_beta1": 0.9,
     "adam_beta2": 0.99,
     "weight_decay": 0.1,
@@ -46,8 +48,8 @@ TRAINING_CONFIG = {
     "optim": "paged_adamw_8bit",
     "logging_steps": 1,
     "per_device_train_batch_size": 1,
-    "gradient_accumulation_steps": 1,
-    "max_prompt_length": 1024,  # Increased from 512 to allow more context in prompts
+    "gradient_accumulation_steps": 2,  # Increased for 70B model
+    "max_prompt_length": 1024,
     "max_grad_norm": 0.1,
     "output_dir": "outputs",
 }

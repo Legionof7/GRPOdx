@@ -676,7 +676,7 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbos
                 load_in_4bit=True,
                 fast_inference=True,
                 max_lora_rank=lora_rank,
-                gpu_memory_utilization=0.6,
+                gpu_memory_utilization=0.9,  # Increased for 70B model
             )
             print(f"Successfully loaded: {model_name}")
             break
