@@ -555,7 +555,12 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=20, use_llm_patie
     
     # Calculate reward using Verdict if enabled, otherwise use the original method
     if use_verdict and final_diagnosis:
-        reward = calculate_verdict_reward(final_diagnosis, disease_info, conversation, num_turns=len(conversation) // 2)
+        try:
+            reward = calculate_verdict_reward(final_diagnosis, disease_info, conversation, num_turns=len(conversation) // 2)
+        except Exception as e:
+            print(f"Verdict reward calculation failed: {e}")
+            print("Falling back to traditional reward calculation.")
+            reward = calculate_traditional_reward(final_diagnosis, disease_info, questions_asked)
     else:
         reward = calculate_traditional_reward(final_diagnosis, disease_info, questions_asked)
     
@@ -575,9 +580,21 @@ def calculate_verdict_reward(diagnosis, disease_info, conversation, num_turns=0)
         A reward score from 0 to 1
     """
     try:
+        # Ensure the current directory isn't interfering with imports
+        import sys
+        current_dir = ''
+        if current_dir in sys.path:
+            # Temporarily remove current directory from path to avoid local imports
+            sys.path.remove(current_dir)
+            
         # Check if verdict is installed and API keys are available
         import importlib.util
         verdict_spec = importlib.util.find_spec("verdict")
+        
+        # Restore path if we modified it
+        if current_dir not in sys.path:
+            sys.path.insert(0, current_dir)
+            
         if verdict_spec is None:
             print("Verdict not installed. To use Verdict-based rewards:")
             print("1. Install with: pip install verdict")
@@ -591,17 +608,28 @@ def calculate_verdict_reward(diagnosis, disease_info, conversation, num_turns=0)
             print("Please set your key: export OPENAI_API_KEY='your-api-key'")
             print("Falling back to traditional reward calculation")
             return calculate_traditional_reward(diagnosis, disease_info, [])
-            
-        # Import verdict modules
-        from verdict import Pipeline, Layer
-        from verdict.common.judge import CategoricalJudgeUnit
-        from verdict.scale import DiscreteScale
-        from verdict.transform import MaxPoolUnit
-        from verdict.schema import Schema
+        
+        # Import verdict modules directly from the installed package
+        try:    
+            # Use absolute imports to avoid the local verdict.py file
+            import verdict
+            from verdict import Pipeline, Layer
+            from verdict.common.judge import CategoricalJudgeUnit
+            from verdict.scale import DiscreteScale
+            from verdict.transform import MaxPoolUnit
+            from verdict.schema import Schema
+            print(f"Successfully imported verdict version: {getattr(verdict, '__version__', 'unknown')}")
+        except ImportError as e:
+            print(f"Error importing verdict modules: {e}")
+            return calculate_traditional_reward(diagnosis, disease_info, [])
         
         # Disable rate limiting for local testing
-        from verdict.util import ratelimit
-        ratelimit.disable()
+        try:
+            from verdict.util import ratelimit
+            ratelimit.disable()
+        except ImportError as e:
+            print(f"Failed to import ratelimit module: {e}")
+            # Continue without disabling rate limiting
         
         # Use GPT-4o for better diagnostic evaluation and direct scoring
         model_to_use = "gpt-4o"

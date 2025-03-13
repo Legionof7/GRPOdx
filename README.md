@@ -45,6 +45,18 @@ Instead of using static disease definitions, the system dynamically generates di
 pip install unsloth vllm
 ```
 
+#### Optional Dependencies
+
+For using Verdict-based reward scoring:
+```
+pip install verdict
+```
+
+Set your OpenAI API key as an environment variable:
+```
+export OPENAI_API_KEY='your-api-key'
+```
+
 ### Training the Model
 
 The main training script is in `GRPODx_implementation.py`. You can train the model using either the command-line interface or directly from Python.
@@ -71,6 +83,7 @@ python run_training.py
 | `--verbose` | flag | True | Print detailed training progress including conversations |
 | `--quiet` | flag | False | Minimize output during training (overrides `--verbose`) |
 | `--llm_patient` | flag | False | Use LLM-based patient simulator instead of rule-based |
+| `--no_verdict` | flag | False | Disable Verdict-based reward scoring (uses traditional rewards) |
 
 #### Example Training Commands
 
@@ -83,6 +96,9 @@ python main.py train --llm_patient
 
 # Short training with evaluation
 python main.py train --steps 100 --evaluate --eval_cases 5
+
+# Training with Verdict-based reward scoring (requires OpenAI API key)
+python main.py train --steps 200 # Verdict is enabled by default, use --no_verdict to disable
 
 # Quiet mode with minimal output
 python main.py train --quiet
@@ -171,6 +187,7 @@ results = evaluate_model(model, tokenizer, test_cases=test_diseases)
 5. **Dynamic Disease Generation**: Creates unlimited training scenarios
 6. **Simulation Mode**: Test the model with virtual patients
 7. **Enhanced Evaluation**: Measures accuracy, efficiency, and symptom coverage
+8. **Verdict-based Rewards**: Optional advanced reward scoring using GPT-4o for better diagnostic quality assessment
 
 ## Implementation Notes
 
@@ -179,6 +196,8 @@ results = evaluate_model(model, tokenizer, test_cases=test_diseases)
 - Training rewards consider diagnosis accuracy, question repetition, and symptom coverage
 - The disease generator creates medically plausible conditions with realistic symptom patterns
 - Disease caching creates a small memory of previously seen conditions for more stable training
+- Verdict-based rewards use GPT-4o to score diagnostic quality on a 0-1 scale with detailed rubrics
+- The system gracefully falls back to traditional rewards if Verdict or OpenAI API is unavailable
 
 ## Extension Possibilities
 
