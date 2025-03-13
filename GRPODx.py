@@ -1197,7 +1197,8 @@ def main():
         action="store_true",
         help="Use GPT-4o-mini for patient simulation",
     )
-    parser.add_argument("--online", action="store_true", help="Use online GRPO training")
+    parser.add_argument("--online", action="store_true", default=True, help="Use online GRPO training")
+    parser.add_argument("--offline", action="store_true", help="Use traditional batch GRPO training instead of online")
     parser.add_argument("--steps", type=int, default=MAX_STEPS, help="Number of training steps")
     parser.add_argument("--num-tests", type=int, default=5, help="Number of test cases")
     parser.add_argument(
@@ -1212,7 +1213,10 @@ def main():
     # If no arguments provided, default to training
     if not (args.train or args.test or args.interact or args.simulate):
         args.train = True
-        args.online = True  # Default to online training
+        
+    # If offline flag is set, it overrides the online flag
+    if args.offline:
+        args.online = False
 
     # Load model and tokenizer
     print("Loading model and tokenizer...")
@@ -1245,27 +1249,12 @@ def main():
             random_state=42,
         )
 
-        if args.online:
-            # Use online GRPO training (generates scenarios on-the-fly)
-            trainer = OnlineGRPOTrainer(
-                model=model,
-                tokenizer=tokenizer,
-                max_steps=args.steps,
-                batch_size=BATCH_SIZE,
-                num_generations=NUM_GENERATIONS,
-                max_turns=5,
-                use_gpt_patient=args.use_gpt_patient or True,
-                output_dir=OUTPUT_DIR
-            )
-            
-            # Run online training
-            trainer.train(save_path=args.model_path)
-        else:
+        if args.offline:
             # Use traditional batch GRPO training
-            # Create training dataset
+            print("Using traditional batch training (offline mode)...")
             print("Creating training dataset...")
             dataset = create_training_dataset(num_samples=100)
-
+            
             # Configure GRPO training
             print("Configuring GRPO trainer...")
             training_args = GRPOConfig(
@@ -1309,6 +1298,22 @@ def main():
             # Save the final model
             print(f"Saving model to {args.model_path}...")
             model.save_lora(args.model_path)
+        else:
+            # Default: Use online GRPO training (generates scenarios on-the-fly)
+            print("Using online GRPO training (default mode)...")
+            trainer = OnlineGRPOTrainer(
+                model=model,
+                tokenizer=tokenizer,
+                max_steps=args.steps,
+                batch_size=BATCH_SIZE,
+                num_generations=NUM_GENERATIONS,
+                max_turns=5,
+                use_gpt_patient=args.use_gpt_patient or True,
+                output_dir=OUTPUT_DIR
+            )
+            
+            # Run online training
+            trainer.train(save_path=args.model_path)
 
         print("Training complete!")
 
