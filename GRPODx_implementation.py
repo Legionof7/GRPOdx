@@ -101,10 +101,16 @@ Your next question to the patient OR your final diagnosis.
 </question>
 """
 
-def format_conversation(conversation_history):
+def format_conversation(conversation_history, turn_number=None):
     """Format conversation history for model input"""
+    system_content = SYSTEM_PROMPT
+    
+    # Add turn number to system prompt if provided
+    if turn_number is not None:
+        system_content += f"\n\nCURRENT TURN: {turn_number}/10"
+    
     formatted_messages = [
-        {"role": "system", "content": SYSTEM_PROMPT}
+        {"role": "system", "content": system_content}
     ]
     
     for entry in conversation_history:
@@ -321,9 +327,12 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=10, use_llm_patie
     questions_asked = []
     
     # Diagnostic conversation loop
-    for _ in range(max_turns):
-        # Format conversation for model input
-        formatted_conv = format_conversation(conversation)
+    for turn in range(max_turns):
+        # Current turn number (1-indexed)
+        current_turn = turn + 1
+        
+        # Format conversation for model input with turn number
+        formatted_conv = format_conversation(conversation, turn_number=current_turn)
         prompt = tokenizer.apply_chat_template(formatted_conv, tokenize=False, add_generation_prompt=True)
         
         # Generate doctor's response
@@ -883,8 +892,8 @@ def interactive_diagnosis(model, tokenizer, simulation_mode=False):
     while turn_count < max_turns:
         turn_count += 1
         
-        # Format conversation for model input
-        formatted_conv = format_conversation(conversation)
+        # Format conversation for model input with turn number
+        formatted_conv = format_conversation(conversation, turn_number=turn_count)
         prompt = tokenizer.apply_chat_template(formatted_conv, tokenize=False, add_generation_prompt=True)
         
         # Generate doctor's response

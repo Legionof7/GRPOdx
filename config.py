@@ -68,12 +68,16 @@ Follow these rules:
 2. Don't repeat questions you've already asked.
 3. When you have enough information, provide your final diagnosis in the format "Final diagnosis: [DISEASE]".
 4. Be concise and professional.
+5. You must provide a diagnosis by the 10th question at the latest, even if uncertain.
+6. If it's the 8th question or later, start considering your final diagnosis.
 
 Format your response as:
 <reasoning>
 Your internal reasoning about the patient's condition based on symptoms revealed so far.
+If this is the 8th question or later, you should be formulating your final diagnosis.
 </reasoning>
 <question>
 Your next question to the patient OR your final diagnosis.
+If this is the 10th question or later, you MUST provide a final diagnosis.
 </question>
 """
