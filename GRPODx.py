@@ -669,28 +669,9 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
     Returns:
         List of reward values between 0 and 1
     """
-    try:
-        # Try to ensure verdict_eval is properly imported at runtime
-        import sys
-        import os
-        
-        # Add the project root to path to ensure imports work
-        project_root = os.path.dirname(os.path.abspath(__file__))
-        if project_root not in sys.path:
-            sys.path.append(project_root)
-            
-        # Force import here to verify it works
-        try:
-            from verdict_eval import evaluate_diagnosis as _verify_import
-            print("Successfully verified Verdict evaluation import")
-        except ImportError as e:
-            print(f"Warning: Verdict import failed: {e}")
-            print("Will use fallback evaluation")
-            
-    except Exception as e:
-        print(f"Setup error: {e}")
-        
-    print("Using reward evaluation function")
+        # Direct import from verdict_eval - no complex error handling
+    from verdict_eval import evaluate_diagnosis as _verify_import
+    print("Using Verdict for evaluation")
     
     rewards = []
     print("Calculating rewards...")
@@ -698,15 +679,7 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
     for i, completion in enumerate(completions):
         content = completion[0]["content"]
         
-        # Early in training, some completions may be empty or minimal
-        if len(content.strip()) < 20:
-            # Give minimal reward but with different values for diversity
-            base_reward = 0.1 + (i * 0.05)  # Different values for GRPO to compare
-            rewards.append(base_reward)
-            print(f"Reward {i+1}/{len(completions)}: {base_reward:.2f} (Minimal response)")
-            continue
-            
-        # Use our built-in evaluate_diagnosis function
+        # Use the Verdict evaluation function directly
         score = evaluate_diagnosis(
             response=content,
             disease_info=disease_info[0],
@@ -715,7 +688,7 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
         
         # Add the score
         rewards.append(score)
-        print(f"Reward {i+1}/{len(completions)}: {score:.2f}")
+        print(f"Reward {i+1}/{len(completions)}: {score:.2f} (Verdict)")
     
     return rewards
 
