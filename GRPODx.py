@@ -190,10 +190,10 @@ Keep your responses relatively brief (1-3 sentences).
         Returns:
             Cleaned message without XML sections
         """
-        # Remove <reasoning>...</reasoning> sections
+        # Remove <reasoning>...</reasoning> sections (including the tags themselves)
         message = re.sub(r'<reasoning>.*?</reasoning>', '', message, flags=re.DOTALL)
         
-        # Remove <answer>...</answer> sections
+        # Remove <answer>...</answer> sections (including the tags themselves)
         message = re.sub(r'<answer>.*?</answer>', '', message, flags=re.DOTALL)
         
         # Clean up any "Final diagnosis:" sections
@@ -427,8 +427,10 @@ Your final diagnosis here
         if verbose:
             # Show what the patient actually sees (cleaned message)
             clean_response = patient._clean_doctor_message(response)
-            print(f"\nPATIENT SEES: {clean_response}")
-            print(f"PATIENT RESPONDS: {patient_response}")
+            print(f"\nWhat the patient actually sees:")
+            print(f"{clean_response}")
+            print(f"\nPatient's Response:")
+            print(f"{patient_response}")
 
     # If no final diagnosis was given, force one in the last turn
     if final_diagnosis is None:
