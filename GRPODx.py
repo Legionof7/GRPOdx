@@ -669,9 +669,9 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
     Returns:
         List of reward values between 0 and 1
     """
-        # Direct import from verdict_eval - no complex error handling
-    from verdict_eval import evaluate_diagnosis as _verify_import
-    print("Using Verdict for evaluation")
+        # Import the GPT-4o-mini based evaluator
+    from verdict_eval import evaluate_diagnosis
+    print("Using GPT-4o-mini for evaluation")
     
     rewards = []
     print("Calculating rewards...")
@@ -688,7 +688,7 @@ def grpo_reward_function(prompts, completions, disease_info, **kwargs) -> List[f
         
         # Add the score
         rewards.append(score)
-        print(f"Reward {i+1}/{len(completions)}: {score:.2f} (Verdict)")
+        print(f"Reward {i+1}/{len(completions)}: {score:.2f} (GPT-4o-mini evaluation)")
     
     return rewards
 
