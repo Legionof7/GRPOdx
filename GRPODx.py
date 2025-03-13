@@ -39,7 +39,7 @@ def ensure_eager_attention(model_name):
 # ======================================================================
 
 # Model settings - using Phi-4 which has better GRPO compatibility
-MAX_SEQ_LENGTH = 4096  # Reduced to prevent CUDA OOM errors
+MAX_SEQ_LENGTH = 2048  # Further reduced to prevent CUDA OOM errors
 LORA_RANK = 16  # Standard LoRA rank for Phi-4 as in the example
 MODEL_NAME = "unsloth/Phi-4"  # Phi-4 model (more compatible with GRPO)
 LOAD_IN_4BIT = True  # 4-bit quantization to fit in limited VRAM
@@ -48,7 +48,7 @@ LOAD_IN_4BIT = True  # 4-bit quantization to fit in limited VRAM
 MAX_STEPS = 300  # Number of training steps
 BATCH_SIZE = 1  # Batch size per device
 GRAD_ACCUMULATION = 1  # Gradient accumulation steps
-NUM_GENERATIONS = 6  # Number of completions per scenario for GRPO
+NUM_GENERATIONS = 4  # Reduced number of completions to save memory
 
 # Paths
 OUTPUT_DIR = "outputs"
@@ -309,7 +309,7 @@ def run_episode(
     tokenizer,
     lora_adapter,
     disease_info: Dict,
-    max_turns: int = 5,  # Reduced to prevent CUDA OOM errors
+    max_turns: int = 3,  # Further reduced to prevent CUDA OOM errors
     use_gpt_patient: bool = True,
 ) -> Tuple[List[Dict], str, float]:
     """Run a single diagnostic conversation episode.
@@ -1033,8 +1033,8 @@ Your final diagnosis here
 class OnlineGRPOTrainer:
     """Online GRPO Trainer that generates disease scenarios on-the-fly during training."""
     
-    def __init__(self, model, tokenizer, lora_adapter=None, max_steps=300, batch_size=8, 
-                 num_generations=8, max_turns=5, use_gpt_patient=True, output_dir="outputs"):
+    def __init__(self, model, tokenizer, lora_adapter=None, max_steps=300, batch_size=4, 
+                 num_generations=4, max_turns=3, use_gpt_patient=True, output_dir="outputs"):
         """Initialize the online GRPO trainer.
         
         Args:
@@ -1065,7 +1065,7 @@ class OnlineGRPOTrainer:
             print(f"Setting batch_size to {self.batch_size}")
         
         # Phi-4 GRPO configuration with balanced prompt and completion lengths
-        max_prompt_length = 2048  # Set to half the MAX_SEQ_LENGTH
+        max_prompt_length = 1024  # Set to half the MAX_SEQ_LENGTH
         
         self.training_args = GRPOConfig(
             learning_rate=5e-6,
@@ -1333,7 +1333,7 @@ def main():
         load_in_4bit=LOAD_IN_4BIT,
         fast_inference=True,  # Enable vLLM fast inference
         max_lora_rank=LORA_RANK,
-        gpu_memory_utilization=0.5,  # Reduced to prevent CUDA OOM errors
+        gpu_memory_utilization=0.75,  # Increased to accommodate cache blocks
         attn_implementation="eager",  # Use eager implementation for Gemma as recommended
     )
 
@@ -1362,7 +1362,7 @@ def main():
             # Configure GRPO training
             print("Configuring GRPO trainer...")
             # Phi-4 GRPO configuration with adjusted prompt length
-            max_prompt_length = 2048  # Set to half the MAX_SEQ_LENGTH
+            max_prompt_length = 1024  # Set to half the MAX_SEQ_LENGTH
             
             training_args = GRPOConfig(
                 learning_rate=5e-6,
@@ -1414,7 +1414,7 @@ def main():
                 max_steps=args.steps,
                 batch_size=BATCH_SIZE,
                 num_generations=NUM_GENERATIONS,
-                max_turns=5,  # Reduced to prevent CUDA OOM errors
+                max_turns=3,  # Further reduced to prevent CUDA OOM errors
                 use_gpt_patient=args.use_gpt_patient or True,
                 output_dir=OUTPUT_DIR
             )
