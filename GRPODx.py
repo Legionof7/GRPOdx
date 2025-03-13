@@ -980,7 +980,7 @@ class OnlineGRPOTrainer:
             output_dir=self.output_dir,
             torch_compile=False,  # Disable torch.compile to avoid tensor dimension issues
             bf16=True,  # Use bf16 precision
-            torch_fsdp=[],  # Disable FSDP
+            # Note: torch_fsdp parameter is not supported in this version
         )
         
         # Track progress
@@ -1282,7 +1282,7 @@ def main():
                 output_dir=OUTPUT_DIR,
                 torch_compile=False,  # Disable torch.compile to avoid tensor dimension issues
                 bf16=True,  # Use bf16 precision
-                torch_fsdp=[],  # Disable FSDP
+                # Note: torch_fsdp parameter is not supported in this version
             )
 
             # Create GRPO trainer
