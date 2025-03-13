@@ -22,6 +22,7 @@ def main():
     
     # Load model parameters (matching training parameters)
     max_seq_length = MODEL_CONFIG["max_seq_length"]
+    lora_rank = MODEL_CONFIG.get("lora_rank", 8)
     
     # Try to load model with fallback options
     model_options = MODEL_CONFIG.get("model_options", [args.model])
@@ -36,6 +37,7 @@ def main():
                 max_seq_length=max_seq_length,
                 load_in_4bit=MODEL_CONFIG["load_in_4bit"],
                 fast_inference=MODEL_CONFIG["fast_inference"],
+                max_lora_rank=lora_rank,
             )
             print(f"Successfully loaded: {model_name}")
             break
@@ -46,6 +48,24 @@ def main():
         print("ERROR: Could not load any of the available models.")
         print("Please check your environment or specify a valid model with --model")
         sys.exit(1)
+        
+    # Load LoRA weights if they exist
+    print("Checking for trained LoRA weights (grpodx_model)...")
+    try:
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=lora_rank,
+            target_modules=MODEL_CONFIG.get("target_modules", [
+                "q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj",
+            ]),
+            lora_alpha=MODEL_CONFIG.get("lora_alpha", lora_rank),
+        )
+        model.load_adapter("grpodx_model", adapter_name="default")
+        print("Successfully loaded fine-tuned weights!")
+    except Exception as e:
+        print(f"Note: Could not load fine-tuned weights: {e}")
+        print("Running with base model only. Diagnoses may be less accurate.")
     
     print("Starting interactive diagnostic session...")
     print("-------------------------------------------")
