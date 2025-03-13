@@ -42,157 +42,83 @@ NUM_GENERATIONS = 8  # Number of completions per scenario for GRPO
 
 # Paths
 OUTPUT_DIR = "outputs"
-DISEASE_DATA_PATH = "diseases.json"  # Path to disease definitions
 SAVED_MODEL_PATH = "grpodx_model"  # Path to save the final model
 
 # ======================================================================
-# Disease Bank and Simulation Environment
+# Dynamic Disease Generation and Simulation Environment
 # ======================================================================
 
 
-class DiseaseBank:
-    """Manages a collection of diseases with their symptoms and definitions."""
+def generate_disease() -> Dict:
+    """Generate a random disease with symptoms using GPT-4o-mini.
+    
+    Returns:
+        Dictionary containing disease name and symptoms
+    """
+    try:
+        system_message = """You are a medical disease generator. 
+Your task is to create a realistic disease scenario with associated symptoms.
+Return ONLY a JSON object with the following format:
+{
+  "disease_name": "Disease Name",
+  "symptoms": {
+    "symptom1": true,  // Present symptoms are true
+    "symptom2": true,
+    "symptom3": false,  // Absent symptoms are false
+    "symptom4": false
+  },
+  "description": "Brief description of the disease"
+}
 
-    def __init__(self, data_path: str = None):
-        """Initialize the disease bank.
+Include at least 8-10 symptoms (mix of present and absent).
+Make the disease realistic but vary between common and rare conditions.
+Do not include any explanatory text, ONLY return the JSON object."""
 
-        Args:
-            data_path: Path to JSON file with disease definitions
-        """
-        self.diseases = []
-
-        # Define default diseases if no path provided
-        if not data_path or not os.path.exists(data_path):
-            self._create_default_diseases()
-        else:
-            self._load_from_file(data_path)
-
-    def _create_default_diseases(self):
-        """Create default set of diseases for training."""
-        self.diseases = [
-            {
-                "disease_name": "Influenza",
-                "symptoms": {
-                    "fever": True,
-                    "cough": True,
-                    "headache": True,
-                    "sore_throat": True,
-                    "muscle_pain": True,
-                    "fatigue": True,
-                    "runny_nose": True,
-                    "sneezing": False,
-                    "chest_pain": False,
-                    "shortness_of_breath": False,
-                },
+        user_message = "Generate a random disease with realistic symptoms and indicate which symptoms are present (true) or absent (false)."
+        
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message}
+            ],
+            temperature=0.7,
+            max_tokens=500,
+        )
+        
+        disease_json = response.choices[0].message.content
+        
+        # Clean up the response if needed (sometimes GPT adds markdown formatting)
+        disease_json = disease_json.replace("```json", "").replace("```", "").strip()
+        
+        # Parse the JSON
+        disease_info = json.loads(disease_json)
+        
+        # Ensure required fields exist
+        if "disease_name" not in disease_info or "symptoms" not in disease_info:
+            raise ValueError("Generated disease missing required fields")
+            
+        return disease_info
+    
+    except Exception as e:
+        print(f"Error generating disease: {e}")
+        # Fallback to a basic disease if generation fails
+        return {
+            "disease_name": "Influenza",
+            "symptoms": {
+                "fever": True,
+                "cough": True,
+                "headache": True,
+                "sore_throat": True,
+                "muscle_pain": True,
+                "fatigue": True,
+                "runny_nose": True,
+                "sneezing": False,
+                "chest_pain": False,
+                "shortness_of_breath": False
             },
-            {
-                "disease_name": "Common Cold",
-                "symptoms": {
-                    "fever": False,
-                    "cough": True,
-                    "headache": False,
-                    "sore_throat": True,
-                    "muscle_pain": False,
-                    "fatigue": True,
-                    "runny_nose": True,
-                    "sneezing": True,
-                    "chest_pain": False,
-                    "shortness_of_breath": False,
-                },
-            },
-            {
-                "disease_name": "COVID-19",
-                "symptoms": {
-                    "fever": True,
-                    "cough": True,
-                    "headache": True,
-                    "sore_throat": True,
-                    "muscle_pain": True,
-                    "fatigue": True,
-                    "runny_nose": False,
-                    "sneezing": False,
-                    "chest_pain": True,
-                    "shortness_of_breath": True,
-                    "loss_of_taste": True,
-                    "loss_of_smell": True,
-                },
-            },
-            {
-                "disease_name": "Pneumonia",
-                "symptoms": {
-                    "fever": True,
-                    "cough": True,
-                    "headache": False,
-                    "sore_throat": False,
-                    "muscle_pain": True,
-                    "fatigue": True,
-                    "runny_nose": False,
-                    "sneezing": False,
-                    "chest_pain": True,
-                    "shortness_of_breath": True,
-                },
-            },
-            {
-                "disease_name": "Strep Throat",
-                "symptoms": {
-                    "fever": True,
-                    "cough": False,
-                    "headache": True,
-                    "sore_throat": True,
-                    "muscle_pain": False,
-                    "fatigue": True,
-                    "runny_nose": False,
-                    "sneezing": False,
-                    "chest_pain": False,
-                    "shortness_of_breath": False,
-                    "swollen_tonsils": True,
-                },
-            },
-        ]
-
-    def _load_from_file(self, path: str):
-        """Load disease definitions from a JSON file.
-
-        Args:
-            path: Path to JSON file with disease definitions
-        """
-        try:
-            with open(path, "r") as f:
-                self.diseases = json.load(f)
-        except Exception as e:
-            print(f"Error loading disease data: {e}")
-            self._create_default_diseases()
-
-    def get_random_disease(self) -> Dict:
-        """Get a random disease from the bank.
-
-        Returns:
-            Random disease definition
-        """
-        return random.choice(self.diseases)
-
-    def all_diseases(self) -> List[Dict]:
-        """Get all diseases in the bank.
-
-        Returns:
-            List of all disease definitions
-        """
-        return self.diseases
-
-    def get_disease_by_name(self, name: str) -> Optional[Dict]:
-        """Look up a disease by name.
-
-        Args:
-            name: Name of the disease to find
-
-        Returns:
-            Disease definition or None if not found
-        """
-        name_lower = name.lower()
-        for disease in self.diseases:
-            if disease["disease_name"].lower() == name_lower:
-                return disease
-        return None
+            "description": "A common viral infection affecting the respiratory system"
+        }
 
 
 class PatientAgent:
@@ -789,24 +715,20 @@ Your final diagnosis here
 # ======================================================================
 
 
-def create_training_dataset(
-    disease_bank: DiseaseBank, num_samples: int = 100
-) -> Dataset:
+def create_training_dataset(num_samples: int = 100) -> Dataset:
     """Create a dataset for training the diagnostic agent.
 
     Args:
-        disease_bank: Bank of diseases to sample from
         num_samples: Number of training samples to generate
 
     Returns:
         Dataset for GRPO training
     """
     data = []
-    diseases = disease_bank.all_diseases()
 
     for _ in range(num_samples):
-        # Sample a random disease
-        disease = random.choice(diseases)
+        # Generate a random disease using GPT-4o-mini
+        disease = generate_disease()
 
         # Create a simple initial prompt
         prompt = [
@@ -868,9 +790,6 @@ def main():
     if not (args.train or args.test or args.interact):
         args.train = True
 
-    # Initialize disease bank
-    disease_bank = DiseaseBank(DISEASE_DATA_PATH)
-
     # Load model and tokenizer
     print("Loading model and tokenizer...")
     model, tokenizer = FastLanguageModel.from_pretrained(
@@ -904,7 +823,7 @@ def main():
 
         # Create training dataset
         print("Creating training dataset...")
-        dataset = create_training_dataset(disease_bank, num_samples=100)
+        dataset = create_training_dataset(num_samples=100)
 
         # Configure GRPO training
         print("Configuring GRPO trainer...")
@@ -958,7 +877,6 @@ def main():
         test_model(
             model,
             tokenizer,
-            disease_bank,
             num_tests=args.num_tests,
             use_gpt_patient=args.use_gpt_patient,
         )
@@ -970,13 +888,12 @@ def main():
         run_interactive_chat(model, tokenizer, lora_adapter)
 
 
-def test_model(model, tokenizer, disease_bank, num_tests=5, use_gpt_patient=True):
+def test_model(model, tokenizer, num_tests=5, use_gpt_patient=True):
     """Test the trained model on some sample cases.
 
     Args:
         model: Trained model
         tokenizer: Tokenizer
-        disease_bank: Disease database
         num_tests: Number of test cases to run
         use_gpt_patient: Whether to use GPT-4o-mini for patient responses
     """
@@ -988,8 +905,8 @@ def test_model(model, tokenizer, disease_bank, num_tests=5, use_gpt_patient=True
     total_reward = 0.0
 
     for i in range(num_tests):
-        # Sample a random disease
-        disease = disease_bank.get_random_disease()
+        # Generate a random disease for testing
+        disease = generate_disease()
         print(f"Test case {i + 1}: Patient has {disease['disease_name']}")
 
         # Run a diagnostic episode

@@ -28,8 +28,8 @@ GRPODx combines:
 The system consists of several key components:
 
 1. **Doctor Agent**: The LLM-based policy being trained via GRPO
-2. **Patient Agent**: Uses GPT-4o-mini to simulate realistic patient responses based on disease symptoms
-3. **Disease Bank**: A collection of diseases with their associated symptoms
+2. **Patient Agent**: Uses GPT-4o-mini to simulate realistic patient responses
+3. **Dynamic Disease Generator**: Uses GPT-4o-mini to create varied disease scenarios on-the-fly
 4. **GPT-4o-mini Reward System**:
    - Uses GPT-4o-mini to evaluate diagnostic correctness
    - Provides numerical scores from 0.0 to 1.0
@@ -40,6 +40,8 @@ The system consists of several key components:
 
 - Multi-turn dialogue between doctor and patient
 - Structured reasoning with XML-based format
+- Dynamic disease generation for unlimited training scenarios
+- GPT-4o-mini for realistic patient simulation
 - Final diagnosis extraction and evaluation
 - Partial credit for close diagnostic matches
 - 4-bit quantization for low VRAM usage (~7-8GB)
@@ -73,17 +75,18 @@ python GRPODx.py --train --test --interact
 
 #### Training Mode
 When training, the script will:
-1. Load the disease definitions from `diseases.json`
-2. Initialize the model with LoRA adapters
-3. Create a training dataset with random disease scenarios
+1. Initialize the model with LoRA adapters
+2. Generate dynamic disease scenarios using GPT-4o-mini
+3. Create a training dataset with these varied medical conditions
 4. Train using GRPO for the specified number of steps
 5. Save the trained model to the specified output path
 
 #### Testing Mode
 When testing, the script will:
-1. Run diagnostic episodes with simulated patients
-2. Evaluate the model's diagnostic accuracy
-3. Optionally use GPT-4o-mini for more realistic patient responses
+1. Generate random disease scenarios using GPT-4o-mini
+2. Run diagnostic episodes with simulated patients
+3. Evaluate the model's diagnostic accuracy
+4. Optionally use GPT-4o-mini for more realistic patient responses
 
 #### Interactive Mode
 In interactive mode, you can:
