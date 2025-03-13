@@ -81,13 +81,21 @@ Return ONLY a JSON object with the following format:
 }
 
 Include at least 8-10 symptoms (mix of present and absent).
-Make the disease realistic but vary between common and rare conditions.
-Be creative and generate unusual or rare diseases occasionally.
-Include some interesting edge cases and complex conditions.
+Focus on standard, common medical conditions that doctors would encounter regularly:
+- Common infectious diseases (flu, pneumonia, strep throat)
+- Chronic conditions (diabetes, hypertension, asthma)
+- Common digestive disorders (GERD, IBS, gallstones)
+- Common skin conditions (eczema, psoriasis, dermatitis)
+- Common cardiovascular conditions (angina, AFib, heart failure)
+- Common respiratory conditions (bronchitis, COPD, sleep apnea)
+
+Make sure to include interesting symptom patterns and realistic presentations.
+Provide detailed symptom constellations that reflect standard medical knowledge.
 Do not include any explanatory text, ONLY return the JSON object."""
 
-        user_message = ("Generate a random disease with realistic symptoms and indicate which symptoms "
-                        "are present (true) or absent (false). Be creative and include rare or unusual conditions.")
+        user_message = ("Generate a random but standard medical condition with realistic symptoms and indicate "
+                        "which symptoms are present (true) or absent (false). Focus on common, well-established "
+                        "conditions that doctors would encounter in practice.")
         
         # Updated OpenAI API call for v1.0.0+
         response = openai.chat.completions.create(
@@ -96,7 +104,7 @@ Do not include any explanatory text, ONLY return the JSON object."""
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": user_message}
             ],
-            temperature=0.9,  # Increased temperature for more variety
+            temperature=0.8,  # Keep temperature high for variety while maintaining realistic symptoms
             max_tokens=500,
         )
         
@@ -221,7 +229,7 @@ Keep your responses relatively brief (1-3 sentences).
                 response = openai.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=self.chat_history,
-                    temperature=0.9,  # Increased temperature for more varied responses
+                    temperature=0.7,  # Keep variety while maintaining realistic responses
                     max_tokens=150,
                 )
 
