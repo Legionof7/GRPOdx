@@ -148,10 +148,32 @@ IMPORTANT RULES:
         )
         
         # Get response from model
-        response = self.model.fast_generate(
-            [prompt],
-            sampling_params=sampling_params,
-        )[0].outputs[0].text.strip()
+        try:
+            # First attempt to use fast_generate (for Unsloth optimized models)
+            response = self.model.fast_generate(
+                [prompt],
+                sampling_params=sampling_params,
+            )[0].outputs[0].text.strip()
+        except AttributeError:
+            # Fall back to regular generate method for standard models
+            import torch
+            
+            # Tokenize the prompt
+            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+            
+            # Generate response
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=100,
+                    temperature=0.7,
+                    top_p=0.95,
+                    do_sample=True,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
+            
+            # Decode the generated tokens
+            response = self.tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
         
         # Truncate if too long
         if len(response) > 200:

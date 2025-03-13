@@ -100,16 +100,39 @@ def run_test_episode(model, tokenizer, disease_info=None, max_turns=20, verbose=
         prompt = tokenizer.apply_chat_template(formatted_conv, tokenize=False, add_generation_prompt=True)
         
         # Generate doctor's response
-        sampling_params = SamplingParams(
-            temperature=0.7,
-            top_p=0.95,
-            max_tokens=1024,  # Increased to allow longer responses
-        )
-        
-        response = model.fast_generate(
-            [prompt],
-            sampling_params=sampling_params,
-        )[0].outputs[0].text
+        # Try different generation methods based on what's available
+        try:
+            # First attempt to use fast_generate (for Unsloth optimized models)
+            sampling_params = SamplingParams(
+                temperature=0.7,
+                top_p=0.95,
+                max_tokens=1024,  # Increased to allow longer responses
+            )
+            
+            response = model.fast_generate(
+                [prompt],
+                sampling_params=sampling_params,
+            )[0].outputs[0].text
+        except AttributeError:
+            # Fall back to regular generate method for standard models
+            import torch
+            
+            # Tokenize the prompt
+            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+            
+            # Generate response
+            with torch.no_grad():
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=1024,
+                    temperature=0.7,
+                    top_p=0.95,
+                    do_sample=True,
+                    pad_token_id=tokenizer.pad_token_id,
+                )
+            
+            # Decode the generated tokens
+            response = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
         
         # Extract parts
         question_text = extract_question(response)
