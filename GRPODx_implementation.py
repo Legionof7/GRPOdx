@@ -503,7 +503,9 @@ def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scen
     return Dataset.from_list(training_data)
 
 # Custom callback function to monitor training progress
-class TrainingCallback:
+from transformers.trainer_callback import TrainerCallback
+
+class TrainingCallback(TrainerCallback):
     def __init__(self, model, tokenizer, print_frequency=10, use_llm_patient=False):
         self.model = model
         self.tokenizer = tokenizer
@@ -512,6 +514,10 @@ class TrainingCallback:
         self.example_scenarios = []
         self.last_rewards = []
         self.use_llm_patient = use_llm_patient
+    
+    def on_init_end(self, args, state, control, **kwargs):
+        """Called at the end of trainer initialization"""
+        return control
         
     def on_step_end(self, args, state, control, **kwargs):
         self.step += 1
