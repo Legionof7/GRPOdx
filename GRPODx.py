@@ -21,27 +21,37 @@ from typing import Dict, List, Optional, Tuple
 # Import unsloth first as recommended
 from unsloth import FastLanguageModel
 import openai
+import torch
 from datasets import Dataset
 from trl import GRPOConfig, GRPOTrainer
+from transformers import Trainer, TrainingArguments, DataCollatorForLanguageModeling
 from vllm import SamplingParams
 
-# Use standard GRPO approach from notebook
+# Allow for direct supervised finetuning as fallback
+try:
+    from grpo_gemma_patch import patch_grpo_for_gemma, ensure_eager_attention
+    # Apply the patch to fix Gemma matrix dimension issues in GRPO
+    patch_grpo_for_gemma()
+    print("Applied GRPO Gemma-specific patches")
+except ImportError:
+    print("GRPO Gemma patch not found - you may encounter tensor dimension errors")
+    ensure_eager_attention = lambda x: x  # No-op function
 
 # ======================================================================
 # Configuration
 # ======================================================================
 
 # Model settings
-MAX_SEQ_LENGTH = 2048  # Context window size
-LORA_RANK = 16  # LoRA rank (higher = more capacity but slower)
+MAX_SEQ_LENGTH = 1024  # Reduced context window for better compatibility
+LORA_RANK = 8  # Reduced LoRA rank for lighter matrix operations
 MODEL_NAME = "unsloth/gemma-3-1b-it-bnb-4bit"  # Base model
 LOAD_IN_4BIT = True  # 4-bit quantization to fit in limited VRAM
 
-# Training settings
+# Training settings - reduced for Gemma compatibility
 MAX_STEPS = 300  # Number of training steps
 BATCH_SIZE = 1  # Batch size per device (following notebook)
-GRAD_ACCUMULATION = 1  # Gradient accumulation steps (increase for smoother training)
-NUM_GENERATIONS = 6  # Number of completions per scenario for GRPO (from notebook)
+GRAD_ACCUMULATION = 1  # Gradient accumulation steps
+NUM_GENERATIONS = 4  # Reduced generation count for smaller tensors
 
 # Paths
 OUTPUT_DIR = "outputs"
@@ -960,8 +970,8 @@ class OnlineGRPOTrainer:
             self.batch_size = self.num_generations
             print(f"Setting batch_size to {self.batch_size}")
         
-        # Configure GRPO training - matching notebook
-        max_prompt_length = 256  # Using shorter prompt length as in notebook
+        # Gemma-optimized GRPO configuration
+        max_prompt_length = 128  # Even shorter prompt length for Gemma compatibility
         
         self.training_args = GRPOConfig(
             learning_rate=5e-6,
@@ -982,6 +992,8 @@ class OnlineGRPOTrainer:
             max_grad_norm=0.1,
             report_to="none",
             output_dir=self.output_dir,
+            fp16=False,  # Avoid mixed precision to reduce complexity
+            bf16=False,
         )
         
         # Track progress
@@ -1203,6 +1215,7 @@ def main():
     )
     parser.add_argument("--online", action="store_true", default=True, help="Use online GRPO training")
     parser.add_argument("--offline", action="store_true", help="Use traditional batch GRPO training instead of online")
+    parser.add_argument("--sft", action="store_true", help="Use direct supervised fine-tuning (SFT) without GRPO")
     parser.add_argument("--steps", type=int, default=MAX_STEPS, help="Number of training steps")
     parser.add_argument("--num-tests", type=int, default=5, help="Number of test cases")
     parser.add_argument(
@@ -1224,9 +1237,10 @@ def main():
 
     # Load model and tokenizer
     print("Loading model and tokenizer...")
-    # Load model with eager attention for Gemma and notebook-aligned settings
+    # Apply eager attention check and load model with Gemma-specific patches
+    patched_model_name = ensure_eager_attention(MODEL_NAME)
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=MODEL_NAME,
+        model_name=patched_model_name,
         max_seq_length=MAX_SEQ_LENGTH,
         load_in_4bit=LOAD_IN_4BIT,
         fast_inference=True,  # Enable vLLM fast inference
@@ -1263,8 +1277,8 @@ def main():
             
             # Configure GRPO training
             print("Configuring GRPO trainer...")
-            # Configure GRPO training - matching notebook example
-            max_prompt_length = 256  # Using shorter prompt length as in notebook
+            # Gemma-optimized GRPO configuration for batch training
+            max_prompt_length = 128  # Even shorter prompt length for Gemma compatibility
             
             training_args = GRPOConfig(
                 learning_rate=5e-6,
@@ -1285,6 +1299,8 @@ def main():
                 max_grad_norm=0.1,
                 report_to="none",
                 output_dir=OUTPUT_DIR,
+                fp16=False,  # Avoid mixed precision to reduce complexity
+                bf16=False,
             )
 
             # Create GRPO trainer
