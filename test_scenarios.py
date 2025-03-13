@@ -101,7 +101,7 @@ def run_test_episode(model, tokenizer, disease_info=None, max_turns=20, verbose=
         sampling_params = SamplingParams(
             temperature=0.7,
             top_p=0.95,
-            max_tokens=768,  # Increased from 512 to match config
+            max_tokens=1024,  # Increased to allow longer responses
         )
         
         response = model.fast_generate(

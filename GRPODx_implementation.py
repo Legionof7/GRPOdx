@@ -276,6 +276,64 @@ def extract_diagnosis_tag(text):
     
     return None
 
+def is_valid_diagnosis(diagnosis_text):
+    """Check if a string looks like a valid diagnosis"""
+    if diagnosis_text is None or len(diagnosis_text.strip()) < 3:
+        return False
+        
+    # Immediate rejection patterns - strings that are definitely not diagnoses
+    rejection_patterns = [
+        r'(considering|consider) (these|this|the) symptoms',
+        r'(considering|consider) (which|what) (specific|best)',
+        r'(aims|aim|going|need) to (explore|examine|determine|clarify|identify)',
+        r'help (differentiate|diagnose|determine|identify)',
+        r'(further|additional|more) (questions|assessment|investigation)',
+        r'(next|my) (question|assessment)',
+        r'(potential|possible|differential) (diagnoses|diagnosis)',
+        r'(systems|symptoms|conditions) (further|affecting)',
+        r'(respiratory|cardiovascular|neurological|gastrointestinal) (system|symptoms)',
+        r'towards conditions affecting',
+        r'(towards|suggesting|suggests|indicative of|pointing to)'
+    ]
+    
+    for pattern in rejection_patterns:
+        if re.search(pattern, diagnosis_text.lower()):
+            print(f"Rejected invalid diagnosis with pattern matching '{pattern}': '{diagnosis_text}'")
+            return False
+            
+    # Must have at least one capitalized word as it should be a disease name
+    has_capitalized = any(word[0].isupper() for word in diagnosis_text.split() if word and len(word) > 1)
+    if not has_capitalized:
+        print(f"Rejected diagnosis without capitalization: '{diagnosis_text}'")
+        return False
+        
+    # Check if it looks like a disease name    
+    # Disease name patterns and indicators
+    disease_indicators = [
+        "itis", "emia", "oma", "pathy", "osis", "disease", "syndrome", 
+        "disorder", "infection", "cancer", "fever", "flu", "cold", 
+        "hepatitis", "diabetes", "arthritis", "pneumonia", "anemia", 
+        "hypertension", "asthma", "migraine", "malaria", "tuberculosis"
+    ]
+    
+    # At least one of these conditions should be true for a valid diagnosis
+    conditions = [
+        # Contains disease-like indicator word
+        any(indicator in diagnosis_text.lower() for indicator in disease_indicators),
+        
+        # Is short (2-3 words) and has capitalization (likely a proper disease name)
+        (len(diagnosis_text.split()) <= 3 and has_capitalized),
+        
+        # Has a specific disease pattern like "X Disease" or "X Syndrome"
+        bool(re.search(r'[A-Z][a-z]+ (Disease|Syndrome|Disorder|Infection)', diagnosis_text))
+    ]
+    
+    if not any(conditions):
+        print(f"Rejected diagnosis that doesn't match disease patterns: '{diagnosis_text}'")
+        return False
+        
+    return True
+
 def extract_diagnosis(text):
     """Extract the diagnosis from text, with safety checks"""
     # Safety check for None or non-string values
@@ -397,7 +455,7 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=20, use_llm_patie
         sampling_params = SamplingParams(
             temperature=0.7,
             top_p=0.95,
-            max_tokens=512,
+            max_tokens=1024,  # Doubled from 512 to prevent truncation
         )
         
         response = model.fast_generate(
@@ -1008,7 +1066,7 @@ def interactive_diagnosis(model, tokenizer, simulation_mode=False):
         sampling_params = SamplingParams(
             temperature=0.7,
             top_p=0.95,
-            max_tokens=512,
+            max_tokens=1024,  # Doubled from 512 to prevent truncation
         )
         
         response = model.fast_generate(
