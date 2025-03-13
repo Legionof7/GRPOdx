@@ -31,6 +31,8 @@ def main():
                            help="Print detailed training progress including conversations")
     train_parser.add_argument("--quiet", action="store_true",
                            help="Minimize output during training")
+    train_parser.add_argument("--llm_patient", action="store_true",
+                           help="Use LLM-based patient simulator instead of rule-based")
     
     # Evaluate command
     eval_parser = subparsers.add_parser("evaluate", help="Evaluate the model")
@@ -65,6 +67,8 @@ def main():
             train_cmd.append("--verbose")
         if args.quiet:
             train_cmd.append("--quiet")
+        if args.llm_patient:
+            train_cmd.append("--llm_patient")
         os.execv(sys.executable, train_cmd)
     
     elif args.command == "evaluate":

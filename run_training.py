@@ -24,6 +24,8 @@ def main():
                       help="Print detailed training progress")
     parser.add_argument("--quiet", action="store_true",
                       help="Minimize output during training")
+    parser.add_argument("--llm_patient", action="store_true",
+                      help="Use LLM-based patient simulator instead of rule-based")
     args = parser.parse_args()
     
     # Set verbosity (--quiet overrides --verbose)
@@ -32,13 +34,15 @@ def main():
     print(f"Starting GRPODx training for {args.steps} steps...")
     print(f"Using batch size {args.batch_size} with {args.completions} completions per scenario")
     print(f"Verbose output: {'Enabled' if verbose else 'Disabled'}")
+    print(f"Patient type: {'LLM-based' if args.llm_patient else 'Rule-based'}")
     
     # Train the model
     model, tokenizer = train_grpodx(
         num_steps=args.steps,
         batch_size=args.batch_size,
         completions_per_scenario=args.completions,
-        verbose=verbose
+        verbose=verbose,
+        use_llm_patient=args.llm_patient
     )
     
     print("Training complete!")

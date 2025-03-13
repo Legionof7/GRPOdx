@@ -283,8 +283,11 @@ def extract_diagnosis(text):
     
     return None
 
+# Import LLM-based patient simulator
+from llm_patient import llm_patient_response, create_llm_patient
+
 # Episode simulation
-def run_episode(model, tokenizer, disease_info=None, max_turns=5):
+def run_episode(model, tokenizer, disease_info=None, max_turns=5, use_llm_patient=False):
     """
     Run a complete diagnostic episode
     
@@ -293,9 +296,10 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=5):
         tokenizer: The tokenizer
         disease_info: Optional disease info. If None, a new disease will be generated
         max_turns: Maximum number of conversation turns
+        use_llm_patient: Whether to use the LLM-based patient simulator
         
     Returns:
-        conversation, final_diagnosis, reward
+        conversation, final_diagnosis, reward, disease_info
     """
     conversation = []
     
@@ -354,8 +358,18 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=5):
             final_diagnosis = diagnosis
             break
         
-        # Generate patient's response
-        patient_reply = patient_response(question_text, disease_info, conversation)
+        # Generate patient's response - either using LLM or rule-based
+        if use_llm_patient:
+            patient_reply = llm_patient_response(
+                question_text, 
+                disease_info, 
+                conversation, 
+                model, 
+                tokenizer
+            )
+        else:
+            patient_reply = patient_response(question_text, disease_info, conversation)
+            
         conversation.append({"role": "user", "content": patient_reply})
     
     # Calculate reward
@@ -383,7 +397,7 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=5):
     return conversation, final_diagnosis, reward, disease_info
 
 # Prepare dataset for GRPO
-def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scenario=6, verbose=True):
+def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scenario=6, verbose=True, use_llm_patient=False):
     """
     Generate a batch of training data for GRPO using dynamically generated diseases
     
@@ -393,6 +407,7 @@ def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scen
         batch_size: Number of different disease scenarios to generate
         completions_per_scenario: Number of completions per disease scenario for GRPO
         verbose: Whether to print the generated conversations
+        use_llm_patient: Whether to use the LLM-based patient simulator
     
     Returns:
         Dataset object containing training data
@@ -431,7 +446,12 @@ def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scen
         episode_data = []
         for episode_idx in range(completions_per_scenario):
             # Run an episode with the same disease
-            conversation, diagnosis, reward, _ = run_episode(model, tokenizer, disease_scenario)
+            conversation, diagnosis, reward, _ = run_episode(
+                model, 
+                tokenizer, 
+                disease_scenario,
+                use_llm_patient=use_llm_patient
+            )
             
             if verbose:
                 print(f"\n--- EPISODE {episode_idx+1}/{completions_per_scenario} ---")
@@ -484,13 +504,14 @@ def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scen
 
 # Custom callback function to monitor training progress
 class TrainingCallback:
-    def __init__(self, model, tokenizer, print_frequency=10):
+    def __init__(self, model, tokenizer, print_frequency=10, use_llm_patient=False):
         self.model = model
         self.tokenizer = tokenizer
         self.print_frequency = print_frequency
         self.step = 0
         self.example_scenarios = []
         self.last_rewards = []
+        self.use_llm_patient = use_llm_patient
         
     def on_step_end(self, args, state, control, **kwargs):
         self.step += 1
@@ -529,7 +550,8 @@ class TrainingCallback:
                 print("\nGENERATING TEST CONVERSATION...")
                 try:
                     conversation, diagnosis, reward, _ = run_episode(
-                        self.model, self.tokenizer, disease, max_turns=4
+                        self.model, self.tokenizer, disease, max_turns=4,
+                        use_llm_patient=self.use_llm_patient
                     )
                     
                     # Print the conversation
@@ -559,7 +581,7 @@ class TrainingCallback:
         return control
 
 # Main training function
-def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbose=True):
+def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbose=True, use_llm_patient=False):
     """
     Main training function for GRPODx
     
@@ -568,6 +590,7 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbos
         batch_size: Number of different diseases per batch
         completions_per_scenario: Number of completions per disease for GRPO
         verbose: Whether to print detailed logs during training
+        use_llm_patient: Whether to use the LLM-based patient simulator
     """
     # Set up model parameters
     max_seq_length = 2048
@@ -643,7 +666,14 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbos
     )
     
     # Generate initial training dataset
-    initial_dataset = generate_training_batch(model, tokenizer, batch_size, completions_per_scenario, verbose=verbose)
+    initial_dataset = generate_training_batch(
+        model, 
+        tokenizer, 
+        batch_size, 
+        completions_per_scenario, 
+        verbose=verbose,
+        use_llm_patient=use_llm_patient
+    )
     
     # Create custom reward function
     def diagnosis_reward_func(prompts, completions, **kwargs):
@@ -728,7 +758,7 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbos
     
     # Create a callback for monitoring
     if verbose:
-        callback = TrainingCallback(model, tokenizer, print_frequency=20)
+        callback = TrainingCallback(model, tokenizer, print_frequency=20, use_llm_patient=use_llm_patient)
     else:
         callback = None
     
