@@ -36,7 +36,7 @@ LOAD_IN_4BIT = True  # 4-bit quantization to fit in limited VRAM
 
 # Training settings
 MAX_STEPS = 300  # Number of training steps
-BATCH_SIZE = 1  # Batch size per device
+BATCH_SIZE = 8  # Batch size per device (must be divisible by NUM_GENERATIONS)
 GRAD_ACCUMULATION = 4  # Gradient accumulation steps
 NUM_GENERATIONS = 8  # Number of completions per scenario for GRPO
 
@@ -76,7 +76,8 @@ Do not include any explanatory text, ONLY return the JSON object."""
 
         user_message = "Generate a random disease with realistic symptoms and indicate which symptoms are present (true) or absent (false)."
         
-        response = openai.ChatCompletion.create(
+        # Updated OpenAI API call for v1.0.0+
+        response = openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_message},
@@ -204,7 +205,7 @@ Keep your responses relatively brief (1-3 sentences).
         if self.use_llm:
             try:
                 # Use GPT-4o-mini to generate a patient response
-                response = openai.ChatCompletion.create(
+                response = openai.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=self.chat_history,
                     temperature=0.7,
@@ -507,7 +508,7 @@ Doctor's Reasoning: {reasoning}
 Evaluate and provide a score from 0.0 to 1.0:"""
 
         # Get the evaluation from GPT-4o-mini
-        response = openai.ChatCompletion.create(
+        response = openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_message},
