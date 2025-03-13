@@ -1044,8 +1044,8 @@ class OnlineGRPOTrainer:
             self.batch_size = self.num_generations
             print(f"Setting batch_size to {self.batch_size}")
         
-        # Phi-4 GRPO configuration with greatly increased prompt length
-        max_prompt_length = 4096  # Significantly increased to allow for much longer conversations
+        # Phi-4 GRPO configuration with balanced prompt and completion lengths
+        max_prompt_length = 2048  # Set to half the MAX_SEQ_LENGTH
         
         self.training_args = GRPOConfig(
             learning_rate=5e-6,
@@ -1342,7 +1342,7 @@ def main():
             # Configure GRPO training
             print("Configuring GRPO trainer...")
             # Phi-4 GRPO configuration with adjusted prompt length
-            max_prompt_length = 4096  # Significantly increased to allow for much longer conversations
+            max_prompt_length = 2048  # Set to half the MAX_SEQ_LENGTH
             
             training_args = GRPOConfig(
                 learning_rate=5e-6,
