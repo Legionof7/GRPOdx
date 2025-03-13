@@ -395,10 +395,36 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6):
         output_dir="outputs",
     )
     
+    # Generate initial training dataset
+    initial_dataset = generate_training_batch(model, tokenizer, batch_size, completions_per_scenario)
+    
     # Create custom reward function
     def diagnosis_reward_func(prompts, completions, **kwargs):
         """Custom reward function for GRPODx"""
         rewards = []
+        
+        # Extract disease names from dataset 
+        disease_names = []
+        try:
+            # First try to get disease names from the training dataset
+            if hasattr(initial_dataset, 'features') and 'disease_name' in initial_dataset.features:
+                disease_names = list(set(initial_dataset['disease_name']))
+        except Exception as e:
+            print(f"Warning: Could not extract disease names from dataset: {e}")
+        
+        # Add example disease names as fallback
+        example_diseases = [d["disease_name"] for d in DISEASE_EXAMPLES]
+        disease_names.extend(example_diseases)
+        
+        # We can't reference the trainer here as it doesn't exist yet
+        # Just use the disease_cache directly
+            
+        # Add any generated diseases
+        if len(disease_cache) > 0:
+            disease_names.extend([d.get("disease_name", "") for d in disease_cache])
+        
+        # Ensure all disease names are strings
+        disease_names = [str(name) for name in disease_names if name]
         
         for completion in completions:
             # Handle different completion formats - could be a string or a dict
@@ -418,30 +444,25 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6):
             # Basic reward - can be expanded with partial matching etc.
             reward = 0.0
             if diagnosis:
-                # Generate a new disease for checking (since we're using dynamic generation)
-                # This rewards general diagnostic format rather than specific disease names
-                reward = 0.5  # Base reward for providing any diagnosis
+                # Base reward for providing any diagnosis in correct format
+                reward = 0.5
                 
-                # Check for disease names in our cache if available
-                disease_cache = kwargs.get('disease_cache', [])
-                if disease_cache:
-                    for disease in disease_cache:
-                        disease_name = disease.get('disease_name', '').lower()
-                        if disease_name and disease_name in diagnosis.lower():
-                            reward = 1.0
-                            break
-                
-                # Check for disease name in the dataset
-                if 'disease_name' in kwargs:
-                    if kwargs['disease_name'].lower() in diagnosis.lower():
+                # Check against known disease names
+                for disease_name in disease_names:
+                    if disease_name.lower() in diagnosis.lower():
                         reward = 1.0
+                        break
+                
+                # If we see XML tags, that's good formatting
+                if "<reasoning>" in response and "</reasoning>" in response:
+                    reward += 0.2
+                
+                if "<question>" in response and "</question>" in response:
+                    reward += 0.2
             
             rewards.append(reward)
         
         return rewards
-    
-    # Generate initial training dataset
-    initial_dataset = generate_training_batch(model, tokenizer, batch_size, completions_per_scenario)
     
     # Setup GRPO trainer
     trainer = GRPOTrainer(
@@ -450,8 +471,10 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6):
         reward_funcs=[diagnosis_reward_func],
         args=training_args,
         train_dataset=initial_dataset,
-        reward_kwargs={"disease_cache": disease_cache},  # Pass reward metadata
     )
+    
+    # Attach disease cache to trainer for reference (won't be used directly by GRPOTrainer)
+    trainer.disease_cache = disease_cache
     
     # Train the model
     trainer.train()
