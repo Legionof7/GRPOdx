@@ -47,13 +47,63 @@ pip install unsloth vllm
 
 ### Training the Model
 
-The main training script is in `GRPODx_implementation.py`. To train the model:
+The main training script is in `GRPODx_implementation.py`. You can train the model using either the command-line interface or directly from Python.
+
+#### Command Line Training
+
+```bash
+# Basic training with default parameters
+python main.py train
+
+# OR use the training script directly
+python run_training.py
+```
+
+#### Available Training Flags
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--steps` | int | 500 | Number of training steps |
+| `--batch_size` | int | 4 | Batch size for training (number of diseases per batch) |
+| `--completions` | int | 6 | Number of completions per scenario for GRPO |
+| `--evaluate` | flag | False | Run evaluation after training |
+| `--eval_cases` | int | 3 | Number of cases to evaluate if `--evaluate` is set |
+| `--verbose` | flag | True | Print detailed training progress including conversations |
+| `--quiet` | flag | False | Minimize output during training (overrides `--verbose`) |
+| `--llm_patient` | flag | False | Use LLM-based patient simulator instead of rule-based |
+
+#### Example Training Commands
+
+```bash
+# Training with custom parameters
+python main.py train --steps 1000 --batch_size 8 --completions 8
+
+# Training with LLM-based patient simulator
+python main.py train --llm_patient
+
+# Short training with evaluation
+python main.py train --steps 100 --evaluate --eval_cases 5
+
+# Quiet mode with minimal output
+python main.py train --quiet
+```
+
+#### Using Python API
 
 ```python
 from GRPODx_implementation import train_grpodx
 
-# Train the model (default: 500 steps)
+# Train the model with default parameters
 model, tokenizer = train_grpodx()
+
+# Train with custom parameters
+model, tokenizer = train_grpodx(
+    num_steps=1000,
+    batch_size=8,
+    completions_per_scenario=8,
+    verbose=True,
+    use_llm_patient=True
+)
 ```
 
 ### Interactive Mode
