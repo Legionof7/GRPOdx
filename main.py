@@ -27,6 +27,10 @@ def main():
                            help="Run evaluation after training")
     train_parser.add_argument("--eval_cases", type=int, default=3,
                            help="Number of cases to evaluate if --evaluate is set")
+    train_parser.add_argument("--verbose", action="store_true", default=True,
+                           help="Print detailed training progress including conversations")
+    train_parser.add_argument("--quiet", action="store_true",
+                           help="Minimize output during training")
     
     # Evaluate command
     eval_parser = subparsers.add_parser("evaluate", help="Evaluate the model")
@@ -57,6 +61,10 @@ def main():
         if args.evaluate:
             train_cmd.append("--evaluate")
             train_cmd.extend(["--eval_cases", str(args.eval_cases)])
+        if args.verbose:
+            train_cmd.append("--verbose")
+        if args.quiet:
+            train_cmd.append("--quiet")
         os.execv(sys.executable, train_cmd)
     
     elif args.command == "evaluate":

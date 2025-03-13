@@ -20,16 +20,25 @@ def main():
                       help="Run evaluation after training")
     parser.add_argument("--eval_cases", type=int, default=3,
                       help="Number of cases to evaluate if --evaluate is set")
+    parser.add_argument("--verbose", action="store_true", default=True,
+                      help="Print detailed training progress")
+    parser.add_argument("--quiet", action="store_true",
+                      help="Minimize output during training")
     args = parser.parse_args()
+    
+    # Set verbosity (--quiet overrides --verbose)
+    verbose = args.verbose and not args.quiet
     
     print(f"Starting GRPODx training for {args.steps} steps...")
     print(f"Using batch size {args.batch_size} with {args.completions} completions per scenario")
+    print(f"Verbose output: {'Enabled' if verbose else 'Disabled'}")
     
     # Train the model
     model, tokenizer = train_grpodx(
         num_steps=args.steps,
         batch_size=args.batch_size,
-        completions_per_scenario=args.completions
+        completions_per_scenario=args.completions,
+        verbose=verbose
     )
     
     print("Training complete!")

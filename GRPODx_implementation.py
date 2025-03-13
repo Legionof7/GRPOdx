@@ -317,7 +317,7 @@ def run_episode(model, tokenizer, disease_info=None, max_turns=5):
     return conversation, final_diagnosis, reward, disease_info
 
 # Prepare dataset for GRPO
-def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scenario=6):
+def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scenario=6, verbose=True):
     """
     Generate a batch of training data for GRPO using dynamically generated diseases
     
@@ -326,6 +326,7 @@ def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scen
         tokenizer: Tokenizer
         batch_size: Number of different disease scenarios to generate
         completions_per_scenario: Number of completions per disease scenario for GRPO
+        verbose: Whether to print the generated conversations
     
     Returns:
         Dataset object containing training data
@@ -333,9 +334,15 @@ def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scen
     training_data = []
     disease_cache = []  # Cache of generated diseases for potential reuse
     
-    for _ in range(batch_size):
+    for batch_idx in range(batch_size):
         # Generate a new disease scenario with 80% probability, or use cached one with 20% probability
         disease_scenario = get_disease(cache=disease_cache, use_cache_probability=0.2)
+        
+        if verbose:
+            print(f"\n{'='*80}")
+            print(f"TRAINING BATCH {batch_idx+1}/{batch_size} - DISEASE: {disease_scenario['disease_name']}")
+            print(f"SYMPTOMS: {', '.join([s.replace('_', ' ') for s, has in disease_scenario['symptoms'].items() if has])}")
+            print(f"{'='*80}")
         
         # Add to cache for potential reuse
         disease_cache.append(disease_scenario)
@@ -350,11 +357,37 @@ def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scen
             related_disease = generate_related_diseases(base_disease, 1)[0]
             disease_scenario = related_disease
             disease_cache.append(related_disease)
+            
+            if verbose:
+                print(f"GENERATED RELATED DISEASE: {disease_scenario['disease_name']}")
+                print(f"SYMPTOMS: {', '.join([s.replace('_', ' ') for s, has in disease_scenario['symptoms'].items() if has])}")
         
         episode_data = []
-        for _ in range(completions_per_scenario):
+        for episode_idx in range(completions_per_scenario):
             # Run an episode with the same disease
             conversation, diagnosis, reward, _ = run_episode(model, tokenizer, disease_scenario)
+            
+            if verbose:
+                print(f"\n--- EPISODE {episode_idx+1}/{completions_per_scenario} ---")
+                print(f"Generated conversation:")
+                for turn_idx, message in enumerate(conversation):
+                    role = message["role"]
+                    content = message["content"]
+                    if role == "user":
+                        print(f"Patient: {content}")
+                    elif role == "assistant":
+                        print(f"Doctor: {content}")
+                    else:
+                        print(f"{role.capitalize()}: {content}")
+                
+                if diagnosis:
+                    print(f"\nFinal diagnosis: {diagnosis}")
+                    print(f"Correct diagnosis: {disease_scenario['disease_name']}")
+                    print(f"Reward: {reward}")
+                else:
+                    print("\nNo final diagnosis provided")
+                    print(f"Reward: {reward}")
+                print("---\n")
             
             # Format for GRPO training
             formatted_conv = format_conversation(conversation)
@@ -383,9 +416,93 @@ def generate_training_batch(model, tokenizer, batch_size=4, completions_per_scen
     
     return Dataset.from_list(training_data)
 
+# Custom callback function to monitor training progress
+class TrainingCallback:
+    def __init__(self, model, tokenizer, print_frequency=10):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.print_frequency = print_frequency
+        self.step = 0
+        self.example_scenarios = []
+        self.last_rewards = []
+        
+    def on_step_end(self, args, state, control, **kwargs):
+        self.step += 1
+        if state.log_history and len(state.log_history) > 0:
+            latest_log = state.log_history[-1]
+            reward = latest_log.get('reward', 0)
+            self.last_rewards.append(reward)
+            
+            # Keep only the last 20 rewards
+            if len(self.last_rewards) > 20:
+                self.last_rewards = self.last_rewards[-20:]
+            
+            # Calculate average reward over recent steps
+            avg_reward = sum(self.last_rewards) / len(self.last_rewards)
+            
+            if self.step % self.print_frequency == 0:
+                # Generate and print a test conversation at regular intervals
+                print(f"\n{'='*40} TRAINING PROGRESS {'='*40}")
+                print(f"Step: {self.step}/{args.max_steps} | Average Reward: {avg_reward:.4f}")
+                
+                # Generate a test conversation with a random disease
+                if len(self.example_scenarios) < 5:
+                    # Generate a few diseases to use for consistent testing
+                    disease = generate_random_disease()
+                    self.example_scenarios.append(disease)
+                else:
+                    # Rotate through the example scenarios
+                    disease = self.example_scenarios[self.step % len(self.example_scenarios)]
+                
+                # Print disease info
+                print(f"\nTEST DISEASE: {disease['disease_name']}")
+                symptoms = [s.replace('_', ' ') for s, has in disease['symptoms'].items() if has]
+                print(f"SYMPTOMS: {', '.join(symptoms)}")
+                
+                # Generate a conversation
+                print("\nGENERATING TEST CONVERSATION...")
+                try:
+                    conversation, diagnosis, reward, _ = run_episode(
+                        self.model, self.tokenizer, disease, max_turns=4
+                    )
+                    
+                    # Print the conversation
+                    for message in conversation:
+                        role = message["role"]
+                        content = message["content"]
+                        if role == "user":
+                            print(f"Patient: {content}")
+                        elif role == "assistant":
+                            print(f"Doctor: {content}")
+                        else:
+                            print(f"{role.capitalize()}: {content}")
+                    
+                    # Print the diagnosis and reward
+                    if diagnosis:
+                        print(f"\nFinal diagnosis: {diagnosis}")
+                        print(f"Correct diagnosis: {disease['disease_name']}")
+                        print(f"Reward: {reward}")
+                    else:
+                        print("\nNo final diagnosis provided")
+                        print(f"Reward: {reward}")
+                except Exception as e:
+                    print(f"Error generating test conversation: {e}")
+                
+                print(f"{'='*90}\n")
+        
+        return control
+
 # Main training function
-def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6):
-    """Main training function for GRPODx"""
+def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6, verbose=True):
+    """
+    Main training function for GRPODx
+    
+    Args:
+        num_steps: Number of training steps
+        batch_size: Number of different diseases per batch
+        completions_per_scenario: Number of completions per disease for GRPO
+        verbose: Whether to print detailed logs during training
+    """
     # Set up model parameters
     max_seq_length = 2048
     lora_rank = 8
@@ -460,7 +577,7 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6):
     )
     
     # Generate initial training dataset
-    initial_dataset = generate_training_batch(model, tokenizer, batch_size, completions_per_scenario)
+    initial_dataset = generate_training_batch(model, tokenizer, batch_size, completions_per_scenario, verbose=verbose)
     
     # Create custom reward function
     def diagnosis_reward_func(prompts, completions, **kwargs):
@@ -543,6 +660,12 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6):
         
         return rewards
     
+    # Create a callback for monitoring
+    if verbose:
+        callback = TrainingCallback(model, tokenizer, print_frequency=20)
+    else:
+        callback = None
+    
     # Setup GRPO trainer
     trainer = GRPOTrainer(
         model=model,
@@ -550,10 +673,18 @@ def train_grpodx(num_steps=500, batch_size=4, completions_per_scenario=6):
         reward_funcs=[diagnosis_reward_func],
         args=training_args,
         train_dataset=initial_dataset,
+        callbacks=[callback] if callback else None,
     )
     
     # Attach disease cache to trainer for reference (won't be used directly by GRPOTrainer)
     trainer.disease_cache = disease_cache
+    
+    if verbose:
+        print(f"\n{'='*30} STARTING TRAINING {'='*30}")
+        print(f"Model will train for {num_steps} steps")
+        print(f"Batch size: {batch_size}, Completions per scenario: {completions_per_scenario}")
+        print(f"Will generate a diagnostic conversation every 20 steps")
+        print(f"{'='*70}\n")
     
     # Train the model
     trainer.train()
