@@ -65,6 +65,7 @@ based on:
 3) Quality and relevance of Doctor's questions.
 
 If the diagnosis is partially correct, give partial credit. If no diagnosis is given, heavily penalize this. In addition, penalize the score if the <reasoning> tags aren't properly formatted or used. Give an additional reward for reaching a correct diagnosis quickly (anything less than 4 questions can begin getting a bonus).
+Penalize if the Doctor model puts irrelevant things in their response, starts hallucinating, acting as the patient, etc. You should grade harshly. A good score (above 0.8) should not be given unless the diagnosis matches and there is no hallucination/formatting errors.
 Write any explanation after the numeric score, but the first float you mention is the official score.
 
 Conversation:
