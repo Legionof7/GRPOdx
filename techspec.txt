@@ -199,7 +199,7 @@ A minimal example:
 python
 Copy
 # main.py
-from unsloth import GRPOTrainer, GRPOConfig
+from trl import GRPOTrainer, GRPOConfig
 from doctor import load_doctor_model, prepare_lora
 from patient import start_patient_system_prompt, get_patient_reply, reveal_hidden_disease
 from reward import score_conversation

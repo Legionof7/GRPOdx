@@ -27,7 +27,8 @@ from dataclasses import dataclass
 
 # Unsloth imports
 from unsloth import FastLanguageModel, is_bfloat16_supported
-from unsloth import GRPOTrainer, GRPOConfig
+# TRL imports for GRPO
+from trl import GRPOTrainer, GRPOConfig
 
 # Configure logging
 logging.basicConfig(
