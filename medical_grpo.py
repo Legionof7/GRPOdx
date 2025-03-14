@@ -88,6 +88,11 @@ Then provide short visible text for the patient.
 
 When you conclude, provide a final line like:
 Final diagnosis: XYZ
+
+Some possibilities are:
+
+   "Influenza",
+    "Common cold"
 """
 
 MAX_TURNS = 5
@@ -394,9 +399,9 @@ def create_doctor_database():
 config = GRPOConfig(
     use_vllm=True,
     learning_rate=5e-6,
-    temperature=0.7,
+    temperature=0.9,
     logging_steps=1,
-    max_steps=20,       # just a small demo
+    max_steps=300,       # just a small demo
     save_steps=10,
     max_prompt_length=max_seq_length-512,
     max_completion_length=512,
