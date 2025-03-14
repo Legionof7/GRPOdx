@@ -1,161 +1,74 @@
-# GRPODx
+# GRPODx: Medical Diagnosis Self-Play with Phi-4
 
-**Autonomous Diagnostic Agent using Group Relative Policy Optimization**
-
-GRPODx is an autonomous diagnostic chatbot that uses reinforcement learning (specifically Group Relative Policy Optimization) to perform medical diagnosis through natural conversation.
+GRPODx is a medical diagnosis training system that uses self-play and Generative Reward Policy Optimization (GRPO) to train a diagnosis model using the Phi-4 architecture.
 
 ## Overview
 
-This project implements a diagnostic system that:
+The system consists of:
 
-1. Conducts multi-turn dialogue with a synthetic patient
-2. Asks relevant questions to gather information
-3. Provides a final diagnosis
-4. Uses GRPO to improve diagnostic accuracy through reinforcement learning
+- A **Doctor model** (Phi-4 with LoRA fine-tuning) that learns to diagnose through conversation
+- A **Patient simulator** (GPT-4o-mini) that roleplays having a hidden disease
+- A **Reward model** (also GPT-4o-mini) that evaluates the doctor's performance
 
-## Technical Implementation
+The Doctor model improves through GRPO, where multiple attempts at the same diagnosis scenario are compared to compute advantages.
 
-GRPODx combines:
+## Key Features
 
-- **Gemma 3 1B** as the base language model
-- **Unsloth's GRPO implementation** for reinforcement learning
-- **QLoRA fine-tuning** for efficient training with limited GPU resources
-- **vLLM** for fast inference
-- **GPT-4o-mini** for patient simulation and reward calculation
+- **Hidden reasoning**: Doctor responses include `<reason>...</reason>` blocks not shown to the patient
+- **Self-play**: Patient model simulates realistic diseases and symptoms
+- **Partial credit**: Reward model provides partial scoring for partially correct diagnoses
+- **GRPO optimization**: Multiple completions per scenario to compute advantages
 
-## Architecture
+## Requirements
 
-The system consists of several key components:
+- Python 3.8+
+- Unsloth
+- PyTorch
+- OpenAI API key (for patient simulation and rewards)
 
-1. **Doctor Agent**: The LLM-based policy being trained via GRPO
-2. **Patient Agent**: Uses GPT-4o-mini to simulate realistic patient responses
-3. **Dynamic Disease Generator**: Uses GPT-4o-mini to create varied disease scenarios on-the-fly
-4. **GPT-4o-mini Reward System**:
-   - Uses GPT-4o-mini to evaluate diagnostic correctness
-   - Provides numerical scores from 0.0 to 1.0
-   - Rewards both accuracy and structured reasoning
-5. **GRPO Trainer**: Coordinates the training process using multiple completions per scenario
+## Installation
 
-## Features
-
-- Multi-turn dialogue between doctor and patient
-- Structured reasoning with XML-based format
-- Dynamic disease generation for unlimited training scenarios
-- GPT-4o-mini for realistic patient simulation
-- Final diagnosis extraction and evaluation
-- Partial credit for close diagnostic matches
-- 4-bit quantization for low VRAM usage (~7-8GB)
-- Interactive chat mode for real user inputs
+```bash
+pip install unsloth torch openai
+```
 
 ## Usage
 
-### Installation
-
 ```bash
-pip install unsloth vllm torch openai
+# Using environment variable for API key
+export OPENAI_API_KEY=your_api_key
+python medical_grpo.py
+
+# Or providing API key directly
+python medical_grpo.py --openai-api-key YOUR_API_KEY
 ```
 
-### Training
+### Command-line Arguments
 
-The script supports multiple modes of operation:
+- `--openai-api-key`: OpenAI API key for patient simulation (defaults to OPENAI_API_KEY environment variable)
+- `--load-checkpoint`: Path to load checkpoint from
+- `--max-steps`: Maximum training steps (default: 1000)
+- `--save-steps`: Steps between checkpoints (default: 100)
+- `--batch-size`: Batch size (default: 2)
+- `--lora-rank`: LoRA rank (default: 16)
 
-```bash
-# Train the model (default)
-python GRPODx.py --train
+## How It Works
 
-# Test the model with simulated patients
-python GRPODx.py --test --num-tests 5 --use-gpt-patient
+1. **Conversation Simulation**:
+   - Patient picks a hidden disease and presents symptoms
+   - Doctor asks questions and provides reasoning
+   - Conversation continues for max 5 turns or until diagnosis
 
-# Run interactive chat mode where you act as the patient
-python GRPODx.py --interact
+2. **Reward Calculation**:
+   - After diagnosis, patient reveals the hidden disease
+   - Reward model evaluates the doctor's performance (0-1 score)
+   - Partial credit given for partially correct diagnoses
 
-# Run simulated chat mode to watch GPT-4o-mini patient interact with the doctor
-python GRPODx.py --simulate
-
-# Run multiple operations
-python GRPODx.py --train --test --interact --simulate
-```
-
-#### Training Mode
-When training, the script will:
-1. Initialize the model with LoRA adapters
-2. Generate dynamic disease scenarios using GPT-4o-mini
-3. Create a training dataset with these varied medical conditions
-4. Train using GRPO for the specified number of steps
-5. Save the trained model to the specified output path
-
-#### Testing Mode
-When testing, the script will:
-1. Generate random disease scenarios using GPT-4o-mini
-2. Run diagnostic episodes with simulated patients
-3. Evaluate the model's diagnostic accuracy
-4. Optionally use GPT-4o-mini for more realistic patient responses
-
-#### Interactive Mode
-In interactive mode, you can:
-1. Chat directly with the AI doctor as a patient
-2. Describe your symptoms and answer the doctor's questions
-3. Receive a final diagnosis with structured reasoning
-
-#### Simulated Mode
-In simulated mode, you can:
-1. Observe a conversation between the AI doctor and a GPT-4o-mini patient
-2. Watch as the doctor analyzes a randomly generated disease scenario
-3. See the diagnostic accuracy compared to the ground truth disease
-
-### Inference
-
-The trained model can be used for interactive diagnosis:
-
-```python
-from GRPODx import test_model, DiseaseBank
-import torch
-import os
-from unsloth import FastLanguageModel
-
-# Set OpenAI API key
-os.environ["OPENAI_API_KEY"] = "your-api-key"
-
-# Load model and tokenizer
-model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name="unsloth/gemma-3-1b-it-bnb-4bit",
-    max_seq_length=2048,
-    load_in_4bit=True,
-    fast_inference=True
-)
-
-# Load disease bank
-disease_bank = DiseaseBank("diseases.json")
-
-# Test with interactive diagnosis (use_gpt_patient=False to use rule-based patient if no API key)
-test_model(model, tokenizer, disease_bank, num_tests=3, use_gpt_patient=True)
-```
-
-## Customization
-
-- **Disease Definitions**: Edit `diseases.json` to add or modify diseases and their symptoms
-- **Model Parameters**: Adjust LoRA rank, learning rate, etc. in the script
-- **Training Settings**: Modify the number of steps, batch size, etc.
-- **Reward Functions**: Customize the reward functions for different training objectives
-
-## Limitations
-
-- Limited to pre-defined diseases and symptoms 
-- Performance depends on the quality of the base model
-- Simplified patient responses compared to real-world scenarios
-
-## Future Work
-
-- Add more complex diseases with overlapping symptoms
-- Implement more sophisticated reward functions
-- Add medical history and demographic information
-- Support multi-modal inputs (e.g., medical images)
-- Develop a more realistic patient simulator
+3. **GRPO Training**:
+   - Multiple completions generated for each scenario
+   - Advantages calculated relative to average reward
+   - LoRA weights updated using advantage-weighted policy gradient
 
 ## License
 
-This project is for educational purposes. The medical diagnoses provided by this model should not be used for actual medical decisions.
-
-## Acknowledgments
-
-This project builds on the Unsloth library and the concept of Group Relative Policy Optimization for reinforcement learning with LLMs.
+MIT

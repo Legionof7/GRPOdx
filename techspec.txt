@@ -1,215 +1,318 @@
+Specification for Doctor–Patient Self-Play with GRPO via Unsloth
 1. Overview
-We aim to build an autonomous diagnostic agent that:
-
-Interacts with a synthetic patient in a multi-turn dialogue.
-Dynamically asks relevant questions.
-Proposes a final diagnosis.
-In this specification, we combine:
-
-The AMIE paper’s concepts (self-play loops, iterative improvement),
-Unsloth’s GRPO framework, which supports low-VRAM reinforcement learning.
-The resulting model should:
-
-Autonomously conduct a diagnostic conversation (multi-turn),
-Use reinforcement learning (specifically GRPO) to reward correct diagnoses,
-Train on limited VRAM (e.g., 7–8GB) in 4-bit or 8-bit quantization,
-Produce a final model that runs interactively (multi-turn inference) with real user inputs.
-2. Key Components
-2.1 Base Model
-Architecture: Llama (7B or 1.5B Qwen2.5) or similar ~ up to 7B parameters to fit in ~7GB VRAM, using QLoRA or LoRA.
-Context Window: ~2k–4k tokens (or more if VRAM allows).
-Instruction-tuned: We can start with an “Instruct” version so it already knows how to handle instructions politely.
-2.2 Self-Play Environment
-We create two “agents”:
-
-Doctor agent (the policy we’re training):
-
-Receives the conversation so far,
-Outputs a question or a final diagnosis.
-Patient agent (scripted or LLM-based with “ground truth” disease):
-
-Has a hidden “disease label.”
-Knows what symptoms are relevant.
-Answers the doctor’s questions truthfully (yes/no/nonspecific), based on the ground-truth disease’s canonical symptoms.
-Goal: The doctor agent must collect enough information from the patient agent to reach the correct diagnosis. The patient agent’s role is to respond consistently with the known disease.
-
-2.3 AMIE-like Self-play Loops
-We adapt the idea from AMIE’s “outer loop” and “inner loop”:
-
-Inner loop: The model (doctor) interacts with the patient agent, possibly gets an iterative in-context critique or reward after the conversation.
-Outer loop: We feed new conversation data back into the policy. Over multiple iterations, we refine the model using new self-play transcripts.
-For each disease scenario:
-
-Generate N conversation “episodes” from the same scenario (N=2..8).
-Each conversation ends with the doctor’s final guess.
-Reward = +1 if correct, 0 if incorrect (or partial credit if relevant).
-The group relative step in GRPO sets the advantage = (reward - group_mean_reward) for each episode, updating the model accordingly.
-3. Data & Disease Scenarios
-We store a set of disease definitions, each with:
-
-python
-Copy
-Edit
-{
-  "disease_name": "Influenza",
-  "symptoms": {
-    "fever": true,
-    "cough": true,
-    "headache": true,
-    "sore_throat": true,
-    ...
-  },
-  # Possibly additional data: typical onset, severity, confounders, etc.
-}
-We randomly sample from this “disease bank” for each training episode.
+We want to train a “Doctor” model using LoRA with GRPO. The Doctor learns to ask better questions and make accurate final diagnoses by engaging in simulated conversations with a “Patient” (GPT-4o-mini). The Patient picks a hidden disease (preferably a common one, chosen freely by GPT-4o-mini), and the Doctor attempts to diagnose it within a fixed number of turns.
 
 Key points:
 
-Each disease scenario references a “ground-truth disease.”
-The patient’s answers reflect the disease’s symptom dictionary.
-4. Training Pipeline with Unsloth GRPO
-4.1 Model Loading
+Hidden chain-of-thought: Each Doctor reply must include <reason>...</reason> blocks with reasoning that is not shown to the Patient.
+Reward model: The same GPT-4o-mini instance (or a separate instance) reads the full conversation (including <reason> blocks) at the end, generates a score 
+[
+0..1
+]
+[0..1], and we use that score for GRPO updates.
+Partial credit: The Judge model should give partial scores for diagnoses that are somewhat correct or partially correct.
+Multiple completions per scenario: We generate multiple Doctor attempts for each scenario to compute an advantage relative to their average reward, then update the LoRA weights accordingly.
+2. High-Level Data Flow
+Doctor Turn
+
+The Doctor sees the conversation so far (no <reason> from previous Doctor turns, only visible text).
+The Doctor produces output containing <reason> ... </reason> (hidden reasoning) followed by the visible text for the Patient.
+We log two versions of the Doctor's output:
+Full text (with <reason>), stored in a “conversation_with_reason” log.
+Visible text (with <reason> removed), stored in a “conversation_no_reason” log (shown to the Patient).
+Patient Turn
+
+GPT-4o-mini (Patient) has chosen a hidden disease (preferably a common one).
+The Patient sees the visible text only.
+The Patient replies accordingly, without revealing the disease unless confirming a final diagnosis.
+End of Conversation
+
+The conversation ends if the Doctor outputs Final diagnosis: ... or we reach MAX_TURNS.
+We then do a separate GPT-4o-mini call to the Patient with a special prompt that says: “Reveal the disease you were simulating.”
+The revealed disease is provided (e.g., “Influenza”).
+Scoring
+
+We feed the entire “conversation_with_reason” (including the Doctor’s <reason> blocks) plus the revealed disease to GPT-4o-mini in a custom reward prompt.
+We parse out the first float in [0..1] from GPT-4o-mini’s response (see next section).
+This score can reflect partial correctness (partial credit) if the Doctor’s final diagnosis is close or partially matches the hidden disease.
+GRPO Updates
+
+For each scenario, we generate multiple completions to compute an average reward.
+For each completion’s reward, advantage = (score - average).
+We then call train_on_records(...) with the (text_data, advantage) pairs to update the Doctor’s LoRA weights.
+3. Implementation Details
+3.1 Loading the Doctor Model & Applying LoRA
 python
 Copy
-Edit
+# doctor.py
 from unsloth import FastLanguageModel
-model, tokenizer = FastLanguageModel.from_pretrained(
-   "unsloth/llama-3.1-7b",
-   load_in_4bit=True,
-   max_seq_length=2048
-)
-Load in 4-bit for lower VRAM usage.
-Possibly set dtype=None or torch.float16 depending on GPU.
-4.2 LoRA/QLoRA Setup
+
+def load_doctor_model():
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        "unsloth/Phi-4",
+        load_in_4bit=True,
+        max_seq_length=2048
+    )
+    return model, tokenizer
+
+def prepare_lora(model):
+    return FastLanguageModel.get_peft_model(
+        model,
+        r=8,
+        target_modules=["q_proj","k_proj","v_proj","o_proj",
+                        "gate_proj","up_proj","down_proj"],
+        lora_alpha=16,
+        lora_dropout=0,
+        bias="none",
+        use_gradient_checkpointing="unsloth"
+    )
+We assume the base model is 4-bit quantized.
+Adjust LoRA hyperparameters as needed.
+3.2 Enforcing <reason>...</reason> in the Doctor’s Output
+Use a system prompt that instructs the Doctor to always produce <reason>...</reason>:
+
+sql
+Copy
+System:
+You are an AI Doctor. Each time you speak, you MUST include a hidden 
+chain-of-thought in the format <reason> ... </reason>.
+
+After writing your hidden reasoning, provide a short statement to the patient.
+Never reveal the text within <reason> to the patient.
+
+If you reach the last turn without providing "Final diagnosis: <Disease>", 
+include that line in your final output (outside <reason>).
+We incorporate this logic in a function that builds the Doctor’s prompt each turn.
+
+3.3 Generating Doctor Turns & Hiding <reason> Content
 python
 Copy
-Edit
-from unsloth import FastLanguageModel
-model = FastLanguageModel.get_peft_model(
-    model,
-    r=8, 
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                    "gate_proj", "up_proj", "down_proj"],
-    lora_alpha=16,
-    lora_dropout=0,
-    bias="none",
-    use_gradient_checkpointing="unsloth"
-)
-Minimal memory overhead.
-4.3 Self-Play Generation
-Pseudo-code for a single batch:
+import re
 
-python
-Copy
-Edit
-def run_episode(model, disease_info):
-    conversation = []
-    # up to 5 doc turns, or until doc outputs "Final diagnosis: ..."
-    # compute final reward based on correctness
-    ...
-    return conversation, final_diagnosis, reward
-Batching:
+def remove_reason_tags(text):
+    # Remove all <reason>...</reason> content
+    return re.sub(r"<reason>.*?</reason>", "", text, flags=re.DOTALL)
 
-For each sample, generate multiple completions (N≥2).
-Compute each completion’s raw reward (1 if final diagnosis matches ground-truth, else 0).
-advantage = raw_reward - mean_reward (Group Relative).
-4.4 GRPO Trainer
-python
-Copy
-Edit
-from unsloth import GRPOConfig, GRPOTrainer
-
-grpo_config = GRPOConfig(
-   epochs=1, # or steps, etc.
-   # other hyperparams...
-)
-
-grpo_trainer = GRPOTrainer(
-   model=model,
-   config=grpo_config,
-   tokenizer=tokenizer,
-   reward_func=None # We'll supply rewards manually
-)
-Main Loop:
-
-python
-Copy
-Edit
-for step in range(NUM_STEPS):
-    # Sample disease + do multiple completions
-    data_batch = []
-    for _ in range(batch_size):
-        scenario = random.choice(disease_bank)
-        completions = []
-        for i in range(num_completions_per_scenario):
-            conv, guess, raw_r = run_episode(model, scenario)
-            completions.append((conv, guess, raw_r))
-        # compute adv
-        avg_r = sum(x[2] for x in completions)/len(completions)
-        for conv, guess, rr in completions:
-            adv = rr - avg_r
-            data_batch.append((conv, adv))
-    # Train
-    grpo_trainer.train_on_records(data_batch)
-5. Reward Design
-Correctness: +1 if final guess == ground truth. 0 otherwise.
-Optional:
-Penalty for repeating the same question.
-Reward partial overlap if guess is “close” to ground-truth disease.
-Implementation: The simplest approach is a Python function that compares final guess to disease_info["disease_name"].
-
-6. AMIE-style Critic / Self-improvement (Optional)
-To replicate AMIE’s approach more closely:
-
-Add a critic (mini-LLM) that reviews the doc’s conversation.
-Provide textual feedback for each step: “You asked the same question repeatedly,” “You forgot to ask about X.”
-The doc then refines its output.
-This second iteration is what you feed into the training loop.
-This second step can be integrated into the code by re-running the doc after each “critic feedback.”
-
-7. Deployment & Inference
-Once training converges, we save the LoRA checkpoint:
+def generate_doctor_turn(doctor_model, prompt):
+    """
+    Returns:
+      full_text: str   (with <reason> blocks)
+      visible_text: str (with <reason> blocks removed)
+    """
+    full_text = doctor_model.fast_generate([prompt], max_new_tokens=256)[0]
+    visible_text = remove_reason_tags(full_text)
+    return full_text, visible_text
+3.4 Patient LLM (GPT-4o-mini)
+The Patient is prompted with a system instruction to pick a common disease and roleplay:
 
 python
 Copy
-Edit
-model.save_pretrained("my-dx-lora")
-Then at inference time (with a real user):
+# patient.py
+def start_patient_system_prompt():
+    return """System:
+Pick a common disease (any from your knowledge base).
+Roleplay as if you have that disease.
+Do not reveal it unless the Doctor provides a final diagnosis or explicitly asks.
+"""
 
-User describes initial symptoms.
-The doc agent starts asking questions.
-The user replies.
-The doc agent eventually outputs “Final diagnosis.”
-We’ll do repeated calls to model.fast_generate() with updated conversation context each turn.
+def get_patient_reply(conversation, patient_system_prompt):
+    """
+    conversation: list of dicts with 'role' and 'content', 
+                  containing only visible text (no <reason>).
+    """
+    messages = [{"role": "system", "content": patient_system_prompt}]
+    for turn in conversation:
+        messages.append({"role": turn["role"], "content": turn["content"]})
+    # Invoke GPT-4o-mini (or other model) with 'messages'
+    # Extract and return the Patient's text
+    return "<patient response>"
 
-Live Chat example:
+def reveal_hidden_disease(conversation, patient_system_prompt):
+    """
+    Instruct the same GPT-4o-mini to reveal which disease it was simulating.
+    For partial credit and correctness, the Doctor's final guess 
+    will be compared to this revealed disease.
+    """
+    # e.g., system prompt: "You were roleplaying as the patient. Now reveal the disease you used."
+    # Return the disease as a string
+    return "<revealed disease>"
+3.5 Reward Model with Partial Credit
+We use GPT-4o-mini again (or a separate instance) to judge the entire conversation (including <reason> blocks) and the final diagnosis. It should:
+
+Evaluate how thorough/logical the <reason> content is.
+Compare the Doctor’s final diagnosis with the hidden disease.
+Provide a float in [0..1]—the first float we find in its response is taken as the score.
+Provide partial credit if the diagnosis is close or partially correct.
+Reward Prompt Example:
 
 python
 Copy
-Edit
-conversation = []
-while True:
-    doc_prompt = format_prompt(conversation)
-    doc_response = model.fast_generate([doc_prompt])[0]
-    conversation.append({"role": "doctor", "content": doc_response})
+# reward.py
+def format_conversation(conversation_with_reason):
+    text = []
+    for turn in conversation_with_reason:
+        role = turn['role'].title()
+        content = turn['content']
+        text.append(f"{role}: {content}")
+    return "\n".join(text)
+
+def score_conversation(conversation_with_reason, hidden_disease):
+    """
+    Return a float score in [0..1]. 
+    We parse out the first float in GPT-4o-mini's response.
+    """
+    conv_text = format_conversation(conversation_with_reason)
+    prompt_for_judge = f"""System:
+You are a medical conversation evaluator. You see the full dialog, 
+including the Doctor's <reason> blocks. The hidden disease was: {hidden_disease}.
+
+Please score the Doctor's performance on these criteria, returning a single float 
+in [0..1] (the first float in your response):
+1) Thoroughness/correctness of the hidden reasoning (<reason>...</reason>).
+2) Accuracy of the final diagnosis vs. {hidden_disease} (partial credit if close).
+3) Relevance and specificity of the Doctor's questions.
+
+Conversation:
+{conv_text}
+"""
+
+    # Call GPT-4o-mini (or reward model) with `prompt_for_judge`
+    # Suppose the raw output is something like: "I would give this a 0.75 overall."
+    raw_judge_output = "<some GPT response with a float>"
     
-    if "Final diagnosis:" in doc_response:
-        break
-    
-    user_answer = input("User: ")
-    conversation.append({"role": "patient", "content": user_answer})
-8. VRAM & Resource Notes
-Model size: 1.5B–7B recommended for a single ~8–12GB GPU in 4-bit QLoRA.
-Longer context: If we want 4k or 8k token context, check VRAM usage.
-Steps: Typically 1–3k steps may suffice for a small demonstration. If coverage is broad (many diseases), you may train longer.
-9. Summary of Steps
-Install & load Unsloth with the chosen LLM in 4-bit.
-Build a self-play environment:
-Each disease scenario is ground truth for the patient agent,
-The doc agent is the trainable model.
-Implement multi-turn episodes → doc’s final guess → reward.
-Use GRPO in Unsloth to handle group-based advantage calculations.
-Train for N steps or epochs.
-Evaluate the doc agent’s accuracy on withheld diseases.
-Deploy interactive inference code.
-This ensures we replicate AMIE’s self-play concept (simulated dialogues, iterative improvement) but rely on Unsloth to do low-VRAM RL (GRPO). The final deliverable is a multi-turn reasoning model that can diagnose conditions from question-answer dialogues.
+    # Parse out the first float
+    import re
+    match = re.search(r"\b\d*\.?\d+\b", raw_judge_output)
+    if match:
+        score_str = match.group(0)
+        score = float(score_str)
+        # Ensure bounding to [0..1] just in case
+        return max(0.0, min(1.0, score))
+    else:
+        # Fallback if we can't parse a float
+        return 0.0
+Note: You can further refine the partial-credit evaluation by adjusting the scoring instructions or by letting GPT-4o-mini produce detailed numeric break-down. But for simplicity, we parse the first float and clamp it to [0..1].
+
+4. Main Training Loop (GRPO)
+A minimal example:
+
+python
+Copy
+# main.py
+from unsloth import GRPOTrainer, GRPOConfig
+from doctor import load_doctor_model, prepare_lora
+from patient import start_patient_system_prompt, get_patient_reply, reveal_hidden_disease
+from reward import score_conversation
+import re
+
+MAX_TURNS = 5
+
+def build_doctor_prompt(conv_no_reason, turn_idx, max_turns):
+    system_msg = f"""System:
+You are an AI Doctor. You can ask at most {max_turns} questions. 
+Each time you speak, include a hidden <reason>...</reason> block. 
+Never reveal the text inside <reason> to the patient.
+
+By the final turn (turn {max_turns}), if you haven't provided 
+"Final diagnosis: <Disease>", do so on that turn. Then stop.
+
+Conversation so far:
+"""
+    for turn in conv_no_reason:
+        system_msg += f"{turn['role'].title()}: {turn['content']}\n"
+    system_msg += "Doctor:"  # Expect the model to continue from here
+    return system_msg
+
+def run_episode(doctor_model):
+    conv_no_reason = []
+    conv_with_reason = []
+    patient_prompt = start_patient_system_prompt()
+
+    for turn_idx in range(1, MAX_TURNS + 1):
+        # Build system prompt for Doctor
+        doc_prompt = build_doctor_prompt(conv_no_reason, turn_idx, MAX_TURNS)
+        full_doc_text, doc_visible = generate_doctor_turn(doctor_model, doc_prompt)
+        
+        # Store both versions
+        conv_with_reason.append({"role": "doctor", "content": full_doc_text})
+        conv_no_reason.append({"role": "doctor", "content": doc_visible})
+
+        # Check if the Doctor gave a final diagnosis
+        if "Final diagnosis:" in doc_visible:
+            break
+
+        # Patient turn
+        pat_reply = get_patient_reply(conv_no_reason, patient_prompt)
+        conv_no_reason.append({"role": "patient", "content": pat_reply})
+        conv_with_reason.append({"role": "patient", "content": pat_reply})
+
+    # At this point, either we reached the turn limit or got a final diagnosis
+    hidden_dx = reveal_hidden_disease(conv_no_reason, patient_prompt)
+
+    # Score conversation with reason
+    score = score_conversation(conv_with_reason, hidden_dx)
+    return conv_no_reason, conv_with_reason, score
+
+def flatten_for_grpo(conv_no_reason):
+    """
+    Flatten the visible conversation for training data. 
+    Typically you'd pass in role tokens or a chat-style format. 
+    Here, we keep it simple.
+    """
+    lines = []
+    for c in conv_no_reason:
+        role = c['role'].upper()
+        text = c['content']
+        lines.append(f"{role}: {text}")
+    return "\n\n".join(lines)
+
+def main():
+    # Load Doctor model & apply LoRA
+    doc_model, doc_tokenizer = load_doctor_model()
+    doc_model = prepare_lora(doc_model)
+
+    # Configure GRPO
+    grpo_cfg = GRPOConfig(
+        # e.g., steps=1000, learning_rate, batch_size, etc.
+    )
+    trainer = GRPOTrainer(doc_model, grpo_cfg, doc_tokenizer)
+
+    def compute_advantages(scores):
+        avg_score = sum(scores) / len(scores)
+        return [s - avg_score for s in scores]
+
+    NUM_STEPS = 1000
+    BATCH_SIZE = 2
+    COMPLETIONS_PER_SCENARIO = 2
+
+    for step in range(NUM_STEPS):
+        data_batch = []
+        
+        # Generate multiple scenarios in each batch
+        for _ in range(BATCH_SIZE):
+            # For each scenario, sample multiple completions
+            completions = []
+            for _ in range(COMPLETIONS_PER_SCENARIO):
+                conv_no_reason, conv_with_reason, sc = run_episode(doc_model)
+                completions.append((conv_no_reason, sc))
+            
+            # Compute advantage-based rewards
+            scores = [c[1] for c in completions]
+            advs = compute_advantages(scores)
+
+            # Build training records
+            for (convNR, scr), adv in zip(completions, advs):
+                text_data = flatten_for_grpo(convNR)
+                data_batch.append((text_data, adv))
+
+        # Update model with GRPO
+        trainer.train_on_records(data_batch)
+
+        if step % 50 == 0:
+            print(f"Completed training step {step}")
+
+    # Save the final LoRA checkpoint
+    doc_model.save_pretrained("doctor_lora_checkpoint")
+
+if __name__ == "__main__":
+    main()
