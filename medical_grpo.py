@@ -221,8 +221,14 @@ async def main(openai_api_key: str):
         return scores
 
     def sync_judge_func(prompts, completions, disease, **kwargs):
-        # Wrap the async call
-        return asyncio.run(_judge_batch(prompts, completions, disease))
+        # Create a new event loop for this function call
+        loop = asyncio.new_event_loop()
+        try:
+            # Run the async function in this new loop
+            return loop.run_until_complete(_judge_batch(prompts, completions, disease))
+        finally:
+            # Always close the loop to free resources
+            loop.close()
 
     # We'll store a single function in reward_funcs:
     # But we must pass 'disease' from the dataset. The trainer automatically passes any dataset fields
