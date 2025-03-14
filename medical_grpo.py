@@ -27,10 +27,10 @@ from dataclasses import dataclass
 
 # Unsloth imports
 from unsloth import FastLanguageModel, is_bfloat16_supported
-# Import GRPOTrainer from unsloth for compatibility with unsloth's implementation
-from unsloth import GRPOTrainer
-# Import GRPOConfig from trl
-from trl import GRPOConfig
+# Import GRPOConfig and GRPOTrainer from trl (consistent with notebook)
+from trl import GRPOConfig, GRPOTrainer
+# Fallback import if trl import fails
+# from unsloth import GRPOTrainer
 
 # Configure logging
 logging.basicConfig(
@@ -498,13 +498,53 @@ async def generate_batch_data(doctor_model, tokenizer, openai_api_key, batch_siz
     return batch_data
 
 
-def setup_grpo_trainer(doctor_model, tokenizer):
+def create_medical_dataset(num_samples=100):
+    """
+    Create a dataset for medical GRPO training.
+    
+    Args:
+        num_samples: Number of samples to generate
+        
+    Returns:
+        Dataset for GRPO training
+    """
+    from datasets import Dataset
+    
+    # Sample medical questions
+    medical_questions = [
+        "What symptoms would indicate I might have diabetes?",
+        "I've been experiencing frequent headaches. What could be the cause?",
+        "My child has a fever of 102°F. Should I be concerned?",
+        "I have persistent joint pain in my knees. What could it be?",
+        "I've noticed unusual weight loss recently. What should I consider?",
+        "My chest hurts when I breathe deeply. What might be wrong?",
+        "I'm having trouble sleeping and feel anxious all the time. What could it be?",
+        "I've been experiencing shortness of breath when exercising. Is this normal?",
+        "My vision has become blurry recently. What might be causing this?",
+        "I have a persistent cough that won't go away. What should I do?",
+    ]
+    
+    # Create dataset with system prompt and medical questions
+    data = []
+    for _ in range(num_samples):
+        question = random.choice(medical_questions)
+        data.append({
+            "prompt": [
+                {"role": "system", "content": DOCTOR_SYSTEM_PROMPT.format(max_turns=MAX_TURNS, current_turn=1, conversation="")},
+                {"role": "user", "content": question}
+            ],
+        })
+    
+    return Dataset.from_list(data)
+
+def setup_grpo_trainer(doctor_model, tokenizer, train_dataset=None):
     """
     Set up the GRPO trainer.
     
     Args:
         doctor_model: The doctor model
         tokenizer: The tokenizer
+        train_dataset: Optional training dataset
         
     Returns:
         GRPO trainer instance
@@ -530,8 +570,11 @@ def setup_grpo_trainer(doctor_model, tokenizer):
             
         return rewards
     
+    # If no dataset provided, create one
+    if train_dataset is None:
+        train_dataset = create_medical_dataset(num_samples=50)
+    
     # Configure GRPO
-    # Note: Make sure all parameters are supported by your version of GRPOConfig
     training_args = GRPOConfig(
         use_vllm=True,
         learning_rate=LEARNING_RATE,
@@ -561,6 +604,7 @@ def setup_grpo_trainer(doctor_model, tokenizer):
         processing_class=tokenizer,
         reward_funcs=[conversation_quality_reward],  # Add required reward functions
         args=training_args,
+        train_dataset=train_dataset,  # Add dataset parameter to match notebook
     )
     
     return trainer
@@ -571,34 +615,46 @@ async def main(openai_api_key):
     # Load model
     doctor_model, tokenizer = load_doctor_model()
     
-    # Setup GRPO trainer
+    # Setup GRPO trainer with static dataset
+    logger.info("Setting up GRPO trainer with static dataset")
     trainer = setup_grpo_trainer(doctor_model, tokenizer)
     
-    # Main training loop
-    for step in range(MAX_STEPS):
-        logger.info(f"Starting training step {step+1}/{MAX_STEPS}")
-        
-        # Generate batch data
-        batch_data = await generate_batch_data(
-            doctor_model, 
-            tokenizer, 
-            openai_api_key,
-            batch_size=BATCH_SIZE,
-            completions_per_scenario=NUM_GENERATIONS
-        )
-        
-        # Train on batch
-        trainer.train_on_records(batch_data)
-        
-        # Save checkpoint periodically
-        if (step + 1) % SAVE_STEPS == 0:
-            checkpoint_path = f"doctor_checkpoint_step_{step+1}"
-            doctor_model.save_pretrained(checkpoint_path)
-            logger.info(f"Saved checkpoint to {checkpoint_path}")
+    # Train the model using trl's GRPOTrainer (similar to notebook approach)
+    logger.info("Starting GRPO training using trainer.train()")
+    trainer.train()
     
-    # Save final model
-    doctor_model.save_pretrained("doctor_final_model")
-    logger.info("Training completed. Final model saved.")
+    # Save the final model
+    checkpoint_path = "doctor_final_model"
+    doctor_model.save_pretrained(checkpoint_path)
+    logger.info(f"Training completed. Final model saved to {checkpoint_path}")
+    
+    if False:  # Keep the alternative approach available but disabled
+        # Alternative approach: on-the-fly data generation with OpenAI API
+        logger.info("Starting GRPO training with on-the-fly data generation")
+        for step in range(MAX_STEPS):
+            logger.info(f"Starting training step {step+1}/{MAX_STEPS}")
+            
+            # Generate batch data
+            batch_data = await generate_batch_data(
+                doctor_model, 
+                tokenizer, 
+                openai_api_key,
+                batch_size=BATCH_SIZE,
+                completions_per_scenario=NUM_GENERATIONS
+            )
+            
+            # Train on batch
+            trainer.train_on_records(batch_data)
+            
+            # Save checkpoint periodically
+            if (step + 1) % SAVE_STEPS == 0:
+                checkpoint_path = f"doctor_checkpoint_step_{step+1}"
+                doctor_model.save_pretrained(checkpoint_path)
+                logger.info(f"Saved checkpoint to {checkpoint_path}")
+        
+        # Save final model
+        doctor_model.save_pretrained("doctor_final_model_dynamic")
+        logger.info("Training completed. Final model saved.")
 
 
 if __name__ == "__main__":
