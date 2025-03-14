@@ -387,12 +387,12 @@ async def main(openai_api_key: str):
         fp16=not is_bfloat16_supported(),
         per_device_train_batch_size=2,  # Increased to work with num_generations
         gradient_accumulation_steps=1,
-        max_steps=999999,  # We'll do our own loop, so set large
+        max_steps=1,  # We'll do our own loop, so set large
         max_grad_norm=0.3,
         num_generations=2,         # Must be divisible by batch size
         max_prompt_length=1024,    # Adjust if needed
         max_completion_length=1024,
-        save_steps=999999,         # We'll do custom saving
+        save_steps=1,         # We'll do custom saving
         report_to="none",
         output_dir="doctor_outputs",
     )
