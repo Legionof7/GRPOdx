@@ -1,32 +1,31 @@
 # -*- coding: utf-8 -*-
-"""Example: Doctor–Patient GRPO with hidden <reason> and multi-turn self-play,
-   plus the fix for maybe_apply_chat_template(...).
+"""
+Doctor–Patient GRPO Example with Unsloth, fixed KeyError on 'prompt'.
 """
 
-########################################
+###########################
 # 0. Imports & Setup
-########################################
+###########################
 from unsloth import FastLanguageModel, PatchFastRL
-PatchFastRL("GRPO", FastLanguageModel)
+PatchFastRL("GRPO", FastLanguageModel)  # Patch for GRPO
 
 from unsloth import is_bfloat16_supported
 import torch
 import random
+import re
 import pandas as pd
 from datasets import Dataset
-import re
 
 # TRL & utility
 from trl import GRPOConfig, maybe_apply_chat_template, apply_chat_template
 from trl.trainer.grpo_trainer import pad
-
-# For device checks, etc.
-from contextlib import nullcontext
 from accelerate.utils import broadcast_object_list, gather_object, set_seed
 
-########################################################
-# 1. Load Base Model & Wrap with LoRA
-########################################################
+print("Imports complete.")
+
+###########################
+# 1. Load Base Model & LoRA
+###########################
 model_name = "Qwen/Qwen2.5-1.5B-Instruct"  # Example smaller model
 max_seq_length = 2048
 lora_rank = 16
@@ -50,7 +49,7 @@ model = FastLanguageModel.get_peft_model(
         "gate_proj", "up_proj", "down_proj",
     ],
     lora_alpha=lora_rank,
-    use_gradient_checkpointing="unsloth",  # optional
+    use_gradient_checkpointing="unsloth",
     random_state=42,
 )
 
@@ -63,9 +62,11 @@ sampling_params = SamplingParams(
     max_tokens=256,
 )
 
-########################################################
-# 2. Doctor–Patient Game Class (Multi-Turn Conversation)
-########################################################
+print("Model + LoRA ready.")
+
+###########################
+# 2. Doctor–Patient Game
+###########################
 
 COMMON_DISEASES = [
     "Influenza",
@@ -222,7 +223,7 @@ Conversation so far:
                     final_guess = guess  # keep last if multiple
 
         if not final_guess:
-            # no final diagnosis
+            # no final diagnosis => 0
             return 0.0
 
         guess_lower = final_guess.lower()
@@ -233,22 +234,22 @@ Conversation so far:
             return 0.8
         return 0.0
 
-########################################################
-# 3. Reward Function Stub
-########################################################
 
+###########################
+# 3. Reward Function Stub
+###########################
 def doctor_game_reward(prompts, completions, **kwargs) -> list[float]:
     """
     A stub returning 0.0 for each text. We'll rely on the custom 
     multi-turn logic to compute the real reward. 
-    This is just to satisfy TRL's interface.
+    This is just to satisfy TRL's interface function signature.
     """
     return [0.0] * len(prompts)
 
-########################################################
-# 4. Custom Trainer for Multi-Turn Self-Play
-########################################################
 
+###########################
+# 4. Custom Trainer
+###########################
 class DoctorGRPOTrainer:
     """
     Minimal demonstration of a custom trainer that:
@@ -256,8 +257,7 @@ class DoctorGRPOTrainer:
       - Gathers the final reward
       - (Normally you'd do advantage-based RL updates)
 
-    We fix the bug with maybe_apply_chat_template by wrapping 
-    the list of messages in a dict: {"messages": ...}.
+    We fix the KeyError by wrapping messages in {"messages": messages}.
     """
 
     def __init__(self, model, tokenizer, reward_funcs, args, train_dataset):
@@ -276,39 +276,42 @@ class DoctorGRPOTrainer:
     def _make_prompt(self, example) -> str:
         """
         Convert a dataset row into an initial prompt for the Doctor.
-        We must pass a dict with "messages" to maybe_apply_chat_template.
+        Must pass a dict with key "messages" to maybe_apply_chat_template.
         """
         system_prompt = """System:
-You are an AI Doctor. You must always produce <reason>...</reason> 
+You are an AI Doctor. You must produce <reason>...</reason> 
 for hidden reasoning, then visible text. 
 If you haven't provided a 'Final diagnosis:' by the last turn, 
 do so.
 """
-        user_content = "I am not feeling well, please diagnose me."
+        user_content = "I feel sick and need help."
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
+            {"role": "user",   "content": user_content},
         ]
 
-        # Fix: pass a dict with "messages"
-        prompt_dict = {"messages": messages}
+        # Wrap in a dict with "messages" => recognized as conversation
+        conversation_dict = {"messages": messages}
 
-        # TRL's maybe_apply_chat_template expects a dict with keys: 
-        #   "messages" or "prompt" or "completion", etc.
-        out = maybe_apply_chat_template(prompt_dict, self.tokenizer)
-        # out will have a combined "prompt" string if it recognized the "messages" format
-        prompt_text = out["prompt"]
+        out = maybe_apply_chat_template(conversation_dict, self.tokenizer)
+        # Some versions might return out["prompt"], others out["text"]. Let's be safe:
+        if "prompt" in out:
+            prompt_text = out["prompt"]
+        elif "text" in out:
+            prompt_text = out["text"]
+        else:
+            raise ValueError("maybe_apply_chat_template did not return 'prompt' or 'text'.")
         return prompt_text
 
     def _multi_turn_generation(self, prompt: str):
         """
         Runs the multi-turn scenario, returns final reward, 
-        and a dummy list of completion token IDs.
+        plus a dummy list of token IDs for the 'completion'.
         """
         scenario = DoctorGame()
         final_reward = scenario.run_episode(self.model)
-        # In reality, you'd store token IDs for each step. We'll just do a dummy list.
+        # In real code, you'd store actual token IDs. Here we just return dummy.
         completion_ids = [0, 1, 2]
         return completion_ids, final_reward
 
@@ -343,20 +346,21 @@ do so.
         # final save
         self.model.save_lora("./doctor_final_lora_checkpoint")
 
-########################################################
-# 5. Configure GRPO & Build Trainer
-########################################################
+
+###########################
+# 5. Configure & Build Trainer
+###########################
 
 training_args = GRPOConfig(
     use_vllm=True,
     learning_rate=5e-6,
     temperature=temperature,
     logging_steps=1,
-    max_steps=10,        # for demo
+    max_steps=10,        # short for demo
     save_steps=5,
     max_prompt_length=1024,
     max_completion_length=512,
-    num_generations=1,   # minimal for example
+    num_generations=1,   # minimal
     output_dir="./doctor_lora_output",
 )
 
@@ -372,9 +376,9 @@ trainer = DoctorGRPOTrainer(
     train_dataset=train_dataset,
 )
 
-########################################################
+###########################
 # 6. Train
-########################################################
-
+###########################
 if __name__ == "__main__":
     trainer.train()
+    print("All done!")
