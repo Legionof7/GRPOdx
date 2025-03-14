@@ -64,7 +64,7 @@ based on:
 2) Whether the final diagnosis matches {revealed_disease},
 3) Quality and relevance of Doctor's questions.
 
-If the diagnosis is partially correct, give partial credit. If no diagnosis is given, heavily penalize this.
+If the diagnosis is partially correct, give partial credit. If no diagnosis is given, heavily penalize this. In addition, penalize the score if the <reasoning> tags aren't properly formatted or used.
 Write any explanation after the numeric score, but the first float you mention is the official score.
 
 Conversation:
@@ -320,8 +320,9 @@ async def run_selfplay_episode(
     
     # Save initial patient statement to file
     with open(output_file, "a") as f:
-        f.write("DOCTOR: Please describe your main symptom or complaint.\n\n")
-        f.write(f"PATIENT: {patient_reply}\n\n")
+        f.write("[DOCTOR (prompt)]: Please describe your main symptom or complaint.\n\n")
+        # Track explicitly as GPT-4o-mini patient model generation
+        f.write(f"[PATIENT (GPT-4o-mini)]: {patient_reply}\n\n")
     
     # Conduct up to max_turns:
     for turn_idx in range(1, max_turns + 1):
@@ -345,9 +346,10 @@ async def run_selfplay_episode(
             reasoning_match = re.search(r"<reason>(.*?)</reason>", full_doc, re.DOTALL)
             if reasoning_match:
                 reasoning = reasoning_match.group(1).strip()
-                f.write(f"DOCTOR REASONING: {reasoning}\n\n")
+                f.write(f"[DOCTOR REASONING]: {reasoning}\n\n")
             
-            f.write(f"DOCTOR: {doc_visible}\n\n")
+            # Track explicitly as local Phi-4 doctor model generation
+            f.write(f"[DOCTOR (Phi-4)]: {doc_visible}\n\n")
         
         # Check if final diagnosis is in doc_visible:
         if "final diagnosis:" in doc_visible.lower():
@@ -364,7 +366,8 @@ async def run_selfplay_episode(
             
             # Save patient response to file
             with open(output_file, "a") as f:
-                f.write(f"PATIENT: {pat_resp}\n\n")
+                # Track explicitly as GPT-4o-mini patient model generation
+                f.write(f"[PATIENT (GPT-4o-mini)]: {pat_resp}\n\n")
     
     # Conversation ended (either due to final dx or hitting max_turns).
     # Reveal the hidden disease from the patient side
@@ -381,15 +384,16 @@ async def run_selfplay_episode(
     # Save the disease reveal and reward to file
     with open(output_file, "a") as f:
         f.write("-"*50 + "\n\n")
-        f.write(f"ACTUAL DISEASE: {revealed}\n\n")
-        f.write(f"CONVERSATION REWARD: {reward:.4f}/1.0\n\n")
+        f.write(f"[PATIENT DISEASE REVEAL (GPT-4o-mini)]: {revealed}\n\n")
+        f.write(f"[REWARD EVALUATION (GPT-4o-mini)]: {reward:.4f}/1.0\n\n")
         f.write("="*50 + "\n")
     
     # Print complete conversation for analysis
     logger.info(f"Episode #{episode_id}: Complete conversation:")
     for i, turn in enumerate(conversation_with_reason):
         role = turn["role"].upper()
-        logger.info(f"  [{i+1}] {role}: {turn['content'][:150]}{'...' if len(turn['content']) > 150 else ''}")
+        source = "GPT-4o-mini" if role == "PATIENT" else "Phi-4"
+        logger.info(f"  [{i+1}] {role} ({source}): {turn['content'][:150]}{'...' if len(turn['content']) > 150 else ''}")
     
     return conversation_no_reason, conversation_with_reason, reward
 
