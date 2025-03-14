@@ -471,7 +471,7 @@ async def main(openai_api_key: str):
         
         # Now we train on this batch_data
         logger.info(f"Training on batch of size {len(batch_data)} from step {step+1}")
-        trainer.train_on_records(batch_data)
+        trainer.train(batch_data)
         
         # Save checkpoint every second step
         if step % 2 == 1:
