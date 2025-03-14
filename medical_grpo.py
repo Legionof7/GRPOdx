@@ -23,9 +23,9 @@ logger = logging.getLogger(__name__)
 
 # Adjust these as needed for your training
 MAX_TURNS = 5       # Max Doctor–Patient exchanges
-NUM_STEPS = 10      # How many outer loops of scenario generation & training
-SCENARIOS_PER_STEP = 2        # How many different patient scenarios per step
-COMPLETIONS_PER_SCENARIO = 2  # Number of completions to compute advantage
+NUM_STEPS = 1      # How many outer loops of scenario generation & training
+SCENARIOS_PER_STEP = 1        # How many different patient scenarios per step
+COMPLETIONS_PER_SCENARIO = 1  # Number of completions to compute advantage
 OPENAI_API_MODEL = "gpt-4o-mini"    # or "gpt-4o-mini" if available
 
 # Prompts
@@ -43,9 +43,10 @@ Begin roleplaying as a patient now.
 
 DOCTOR_SYSTEM_INSTRUCTIONS = """System:
 You are an AI Doctor. Each time you speak, you MUST include a hidden chain-of-thought
-within <reason>...</reason> tags. 
+within <reason>...</reason> tags before you ask your question.
 
-After writing your hidden reasoning in <reason>, produce a short statement to the patient.
+After writing your hidden reasoning in <reason>, give the patient a short question to help determine their condition.
+When you know what the correct answer is, say: "Final diagnosis: <disease>", filling in <disease> with their actual disease.
 
 NEVER reveal the text inside <reason> to the patient. 
 You have a maximum of {max_turns} total question/answer exchanges.
