@@ -23,9 +23,9 @@ logger = logging.getLogger(__name__)
 
 # Adjust these as needed for your training
 MAX_TURNS = 5       # Max Doctor–Patient exchanges
-NUM_STEPS = 500      # How many outer loops of scenario generation & training
+NUM_STEPS = 1      # How many outer loops of scenario generation & training
 SCENARIOS_PER_STEP = 1        # How many different patient scenarios per step
-COMPLETIONS_PER_SCENARIO = 5  # Number of completions to compute advantage
+COMPLETIONS_PER_SCENARIO = 1  # Number of completions to compute advantage
 OPENAI_API_MODEL = "gpt-4o-mini"    # or "gpt-4o-mini" if available
 
 # Prompts
