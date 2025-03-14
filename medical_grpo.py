@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Doctor–Patient GRPO Example with Unsloth, logs each conversation to a CSV.
+Doctor–Patient GRPO Example with Unsloth, logs each conversation to console AND a CSV file.
 """
 
 ###########################
@@ -16,13 +16,11 @@ import re
 import pandas as pd
 from datasets import Dataset
 import os
+import datetime
 
 # TRL & utility
 from trl import GRPOConfig, maybe_apply_chat_template
 from accelerate.utils import broadcast_object_list, gather_object, set_seed
-
-# For logging conversations as text
-import datetime
 
 print("Imports complete.")
 
@@ -106,8 +104,8 @@ class DoctorGame:
     Simulates a multi-turn conversation:
       - The Patient picks a hidden disease from a list.
       - The Doctor tries to figure it out within MAX_TURNS.
-      - The Doctor's chain-of-thought is enclosed in <reason> tags, 
-        which we store but do NOT show to the Patient.
+      - The Doctor's chain-of-thought is enclosed in <reason>...</reason>,
+        which we do NOT show to the Patient.
       - We compute a final partial-credit reward in [0..1].
     """
 
@@ -157,7 +155,6 @@ Conversation so far:
             self.done = True
             return ""
 
-        # disease-based simple response
         disease_map = {
             "Influenza": "I have a fever, chills, cough, and muscle aches.",
             "Common cold": "I have a runny nose, sneezing, maybe a mild cough.",
@@ -249,19 +246,18 @@ def doctor_game_reward(prompts, completions, **kwargs) -> list[float]:
     """
     A stub returning 0.0 for each text. We'll rely on the custom 
     multi-turn logic to compute the real reward. 
-    This is just to satisfy TRL's interface if needed.
     """
     return [0.0] * len(prompts)
 
 
 ###########################
-# 4. Custom Trainer w/ Logging
+# 4. Custom Trainer w/ Logging to Console & CSV
 ###########################
 class DoctorGRPOTrainer:
     """
     - For each training step, runs a multi-turn "DoctorGame"
     - Gathers the final reward
-    - Logs the conversation details
+    - Logs the conversation details to console + CSV
     - (Normally you'd do advantage-based RL updates)
     """
 
@@ -318,7 +314,6 @@ do so.
          - Build prompt
          - Run multi-turn generation
          - Log conversation & final reward
-         - (Real code: advantage-based RL updates)
         """
         for step in range(self.max_steps):
             # pick random row
@@ -329,13 +324,7 @@ do so.
             scenario = DoctorGame()
             final_reward = scenario.run_episode(self.model)
 
-            # Store conversation logs
-            # scenario.conv_with_reason: full text including <reason>
-            # scenario.conv_no_reason: only visible text
-            # scenario.hidden_disease
-            # final_reward
-
-            # Flatten them into strings
+            # Build strings for logging
             conv_with_reason_str = "\n".join(
                 f"{turn['role'].title()}: {turn['content']}" 
                 for turn in scenario.conv_with_reason
@@ -345,6 +334,7 @@ do so.
                 for turn in scenario.conv_no_reason
             )
 
+            # Store in memory
             self.episodes_log.append({
                 "step": step+1,
                 "hidden_disease": scenario.hidden_disease,
@@ -353,7 +343,17 @@ do so.
                 "conversation_no_reason": conv_no_reason_str
             })
 
-            # Print for quick view
+            # ===== Print logs to console =====
+            print(f"\n===== [Step {step+1}] Episode Log =====")
+            print(f"Hidden disease: {scenario.hidden_disease}")
+            print(f"Final reward: {final_reward:.3f}")
+            print("\n--- Conversation WITH reason ---\n")
+            print(conv_with_reason_str)
+            print("\n--- Conversation NO reason ---\n")
+            print(conv_no_reason_str)
+            print("==========================================\n")
+
+            # Also print a short line
             print(f"[Step {step+1}] final reward = {final_reward:.3f}")
 
             if (step+1) % self.save_steps == 0:
@@ -367,7 +367,7 @@ do so.
         # final save
         self.model.save_lora("./doctor_final_lora_checkpoint")
 
-        # Also log to a CSV for later inspection
+        # Save logs to a CSV
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         logs_df = pd.DataFrame(self.episodes_log)
         os.makedirs("./logs", exist_ok=True)
@@ -379,8 +379,6 @@ do so.
 ###########################
 # 5. Configure & Build Trainer
 ###########################
-from trl import GRPOConfig
-
 training_args = GRPOConfig(
     use_vllm=True,
     learning_rate=5e-6,
