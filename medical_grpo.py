@@ -507,6 +507,7 @@ def setup_grpo_trainer(doctor_model, tokenizer):
         GRPO trainer instance
     """
     # Configure GRPO
+    # Note: Make sure all parameters are supported by your version of GRPOConfig
     training_args = GRPOConfig(
         use_vllm=True,
         learning_rate=LEARNING_RATE,
@@ -519,7 +520,7 @@ def setup_grpo_trainer(doctor_model, tokenizer):
         logging_steps=1,
         bf16=is_bfloat16_supported(),
         fp16=not is_bfloat16_supported(),
-        per_device_train_batch_size=1,
+        per_device_train_batch_size=4,  # Ensure divisible by num_generations
         gradient_accumulation_steps=4,
         num_generations=NUM_GENERATIONS,
         max_prompt_length=1024,
