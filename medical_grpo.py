@@ -6,6 +6,7 @@ import time
 import random
 import logging
 import asyncio
+import requests
 from typing import List, Dict, Any
 
 # Unsloth
@@ -198,37 +199,82 @@ async def main(openai_api_key: str):
         output_dir="grpo_outputs",
     )
 
-    # We'll define a custom reward function that calls the judge (GPT-4o-mini).
-    # The trainer automatically calls this function for each generation. 
-    # We'll need to do it asynchronously, so we do a little trick:
-    # - We'll store an event loop or we can do a synchronous wrapper.
-    # But let's keep it simple: we do a "synchronous" call with 'asyncio.run(...)' inside the function,
-    # which might not be best practice, but it's an example.
-    async def _judge_batch(prompts, completions, diseases):
-        # We'll do them one by one for clarity
-        scores = []
-        for prompt, completion_list, disease in zip(prompts, completions, diseases):
-            # 'completion_list' is a list of 1 or more completions
-            # We'll just pick the single completion if there's 1, or average them if there are multiple
+    # Create a fully synchronous reward function using requests instead of asyncio
+    def judge_conversation_sync(conversation, disease, api_key):
+        import requests
+        import json
+        
+        # Format a message to the reward model
+        prompt = f"""You are evaluating a conversation between a doctor and a patient.
+The patient has: {disease}
+The conversation is: {conversation}
+Rate the doctor's performance from 0 to 1, where:
+- 0 means completely incorrect diagnosis, poor questions, poor reasoning
+- 0.5 means somewhat reasonable diagnosis and questions, but could be better
+- 1 means perfect diagnosis, highly relevant questions, clear reasoning
+Use the following rating scale, and output ONLY A SINGLE FLOAT between 0 and 1:
+"""
+        
+        # Make a synchronous OpenAI API call
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        payload = {
+            "model": OPENAI_API_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 50,
+            "temperature": 0.0
+        }
+        
+        try:
+            response = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers,
+                json=payload
+            )
+            response_json = response.json()
+            text = response_json["choices"][0]["message"]["content"]
+            
+            # Extract the floating-point score (0..1)
+            match = re.search(r'(\d+\.\d+)', text)
+            if match:
+                try:
+                    score = float(match.group(1))
+                    # clamp to [0,1]
+                    score = max(0.0, min(1.0, score))
+                    return score
+                except:
+                    pass
+        except Exception as e:
+            logger.error(f"Error in reward function: {str(e)}")
+            
+        # Default if no valid score found
+        return 0.5
+
+    def sync_judge_func(prompts, completions, disease, **kwargs):
+        """Fully synchronous reward function that evaluates all completions"""
+        scores = []  # will be a list of scores, one per prompt
+        
+        # Convert diseases to a list if it's not already
+        if not isinstance(disease, list):
+            diseases = [disease] * len(prompts)
+        else:
+            diseases = disease
+            
+        for i, (prompt, completion_list, disease_value) in enumerate(zip(prompts, completions, diseases)):
+            # Process each completion for this prompt
             local_scores = []
             for c in completion_list:
                 text = c["content"]  # a single big string with the entire conversation
-                # call the judge
-                sc = await judge_conversation(text, disease, openai_api_key)
+                # call the synchronous judge
+                sc = judge_conversation_sync(text, disease_value, openai_api_key)
                 local_scores.append(sc)
+            
             # Return the average for this prompt
             scores.append(sum(local_scores)/len(local_scores))
+            
         return scores
-
-    def sync_judge_func(prompts, completions, disease, **kwargs):
-        # Create a new event loop for this function call
-        loop = asyncio.new_event_loop()
-        try:
-            # Run the async function in this new loop
-            return loop.run_until_complete(_judge_batch(prompts, completions, disease))
-        finally:
-            # Always close the loop to free resources
-            loop.close()
 
     # We'll store a single function in reward_funcs:
     # But we must pass 'disease' from the dataset. The trainer automatically passes any dataset fields
