@@ -474,14 +474,32 @@ async def generate_batch_data(doctor_model, tokenizer, openai_api_key, batch_siz
     """
     batch_data = []
     
-    for _ in range(batch_size):
+    logger.info(f"Generating batch data: {batch_size} scenarios with {completions_per_scenario} completions each")
+    
+    for scenario_idx in range(batch_size):
+        logger.info(f"Starting scenario {scenario_idx+1}/{batch_size}")
         scenario_completions = []
         
         # Run multiple completions for the same scenario
-        for _ in range(completions_per_scenario):
+        for completion_idx in range(completions_per_scenario):
+            logger.info(f"Running completion {completion_idx+1}/{completions_per_scenario} for scenario {scenario_idx+1}")
+            
             conversation, reward = await run_conversation_episode(
                 doctor_model, tokenizer, openai_api_key
             )
+            
+            # Print the conversation and reward
+            logger.info(f"\n{'='*80}\nScenario {scenario_idx+1}, Completion {completion_idx+1}")
+            logger.info(f"Conversation:")
+            for turn in conversation:
+                role = turn['role'].upper()
+                content = turn['content']
+                # Truncate content for display if too long
+                if len(content) > 200:
+                    content = content[:200] + "..."
+                logger.info(f"{role}: {content}")
+            logger.info(f"REWARD: {reward:.4f}\n{'='*80}")
+            
             scenario_completions.append((conversation, reward))
         
         # Calculate advantages based on average reward for this scenario
@@ -489,12 +507,19 @@ async def generate_batch_data(doctor_model, tokenizer, openai_api_key, batch_siz
         avg_reward = sum(rewards) / len(rewards)
         advantages = [reward - avg_reward for reward in rewards]
         
+        logger.info(f"Scenario {scenario_idx+1} complete")
+        logger.info(f"Rewards: {rewards}")
+        logger.info(f"Average reward: {avg_reward:.4f}")
+        logger.info(f"Advantages: {advantages}")
+        
         # Format data for GRPO trainer
-        for (conversation, _), advantage in zip(scenario_completions, advantages):
+        for (conversation, reward), advantage in zip(scenario_completions, advantages):
             # Format into a single text for GRPO
             formatted_text = format_conversation(conversation, include_reason=True)
             batch_data.append((formatted_text, advantage))
+            logger.info(f"Added training example with reward {reward:.4f} and advantage {advantage:.4f}")
     
+    logger.info(f"Batch data generation complete. Generated {len(batch_data)} training examples.")
     return batch_data
 
 
@@ -550,22 +575,46 @@ def setup_grpo_trainer(doctor_model, tokenizer, train_dataset=None):
         GRPO trainer instance
     """
     # Define reward functions
-    def conversation_quality_reward(completions, **kwargs) -> list[float]:
+    def conversation_quality_reward(completions, prompts=None, **kwargs) -> list[float]:
         """Reward function for conversation quality and format."""
         responses = [completion[0]['content'] for completion in completions]
         rewards = []
         
-        for response in responses:
+        # Print prompts for debugging if available
+        if prompts:
+            for i, prompt in enumerate(prompts):
+                user_query = prompt[-1]['content'] if isinstance(prompt, list) and prompt else "No prompt"
+                logger.info(f"\n{'='*40}\nPrompt {i}: {user_query[:100]}...\n{'='*40}")
+        
+        for i, response in enumerate(responses):
             reward = 0.0
             # Check for <reason> tags
-            if "<reason>" in response and "</reason>" in response:
+            has_reason_tags = "<reason>" in response and "</reason>" in response
+            if has_reason_tags:
                 reward += 0.5
+                
             # Check for coherent response
-            if len(response) > 50:
+            is_coherent = len(response) > 50
+            if is_coherent:
                 reward += 0.3
+                
             # Check for diagnostic language
-            if any(term in response.lower() for term in ["diagnosis", "condition", "symptom", "treatment"]):
+            has_medical_terms = any(term in response.lower() for term in 
+                                   ["diagnosis", "condition", "symptom", "treatment"])
+            if has_medical_terms:
                 reward += 0.2
+                
+            # Extract reason section
+            reason_text = ""
+            if has_reason_tags:
+                try:
+                    reason_text = re.search(r"<reason>(.*?)</reason>", response, re.DOTALL).group(1).strip()
+                except:
+                    reason_text = "Couldn't extract reason"
+            
+            # Print conversation for debugging
+            logger.info(f"\n{'*'*80}\nResponse {i}:\n{response[:200]}...\n\nReason: {reason_text[:150]}...\n\nReward: {reward:.2f} (reason: {0.5 if has_reason_tags else 0}, coherent: {0.3 if is_coherent else 0}, medical: {0.2 if has_medical_terms else 0})\n{'*'*80}")
+            
             rewards.append(reward)
             
         return rewards
@@ -612,15 +661,56 @@ def setup_grpo_trainer(doctor_model, tokenizer, train_dataset=None):
 
 async def main(openai_api_key):
     """Main training loop"""
+    # Configure more verbose logging
+    logger.setLevel(logging.INFO)
+    # Add a stream handler to ensure logs are printed to terminal
+    if not logger.handlers:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+    
+    logger.info("="*50)
+    logger.info("STARTING MEDICAL GRPO TRAINING")
+    logger.info("="*50)
+    
     # Load model
     doctor_model, tokenizer = load_doctor_model()
     
+    # Create a smaller dataset for easier debugging
+    from datasets import Dataset
+    debug_dataset = create_medical_dataset(num_samples=10)
+    
+    # Print some examples from the dataset
+    logger.info(f"Created dataset with {len(debug_dataset)} examples. Sample prompts:")
+    for i in range(min(3, len(debug_dataset))):
+        prompt = debug_dataset[i]['prompt']
+        system = prompt[0]['content'] if len(prompt) > 0 else "No system prompt"
+        user = prompt[1]['content'] if len(prompt) > 1 else "No user prompt"
+        logger.info(f"Example {i}:")
+        logger.info(f"  System: {system[:100]}...")
+        logger.info(f"  User: {user}")
+    
     # Setup GRPO trainer with static dataset
     logger.info("Setting up GRPO trainer with static dataset")
-    trainer = setup_grpo_trainer(doctor_model, tokenizer)
+    trainer = setup_grpo_trainer(doctor_model, tokenizer, train_dataset=debug_dataset)
     
-    # Train the model using trl's GRPOTrainer (similar to notebook approach)
+    # Add a callback to print each step's progress
+    class LoggingCallback:
+        def on_step_end(self, args, state, control, **kwargs):
+            if state.global_step % 1 == 0:
+                logger.info(f"Step {state.global_step}: loss={state.train_loss:.6f}, reward={kwargs.get('reward', 'N/A')}")
+                logger.info(f"Learning stats: {kwargs}")
+    
+    # Train the model using trl's GRPOTrainer
     logger.info("Starting GRPO training using trainer.train()")
+    # Try to inject our callback if possible
+    try:
+        trainer.add_callback(LoggingCallback())
+    except:
+        logger.warning("Could not add logging callback. Will continue without detailed step logs.")
+    
     trainer.train()
     
     # Save the final model
