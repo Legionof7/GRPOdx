@@ -471,7 +471,11 @@ async def main(openai_api_key: str):
         
         # Now we train on this batch_data
         logger.info(f"Training on batch of size {len(batch_data)} from step {step+1}")
-        trainer.train(batch_data)
+        for text, advantage in batch_data:
+            trainer.grpo_step(
+                prompt=[{"role": "user", "content": text}],
+                advantage=[advantage]
+            )
         
         # Save checkpoint every second step
         if step % 2 == 1:
