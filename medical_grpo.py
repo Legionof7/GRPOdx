@@ -23,9 +23,9 @@ logger = logging.getLogger(__name__)
 
 # Adjust these as needed for your training
 MAX_TURNS = 5       # Max Doctor–Patient exchanges
-NUM_STEPS = 500      # How many outer loops of scenario generation & training
-SCENARIOS_PER_STEP = 1        # How many different patient scenarios per step
-COMPLETIONS_PER_SCENARIO = 5  # Number of completions to compute advantage
+NUM_STEPS = 25      # How many outer loops of scenario generation & training
+SCENARIOS_PER_STEP = 5        # How many different patient scenarios per step
+COMPLETIONS_PER_SCENARIO = 4  # Number of completions to compute advantage
 OPENAI_API_MODEL = "gpt-4o-mini"    # or "gpt-4o-mini" if available
 
 # Prompts
@@ -433,7 +433,7 @@ async def main(openai_api_key: str):
         fp16=not is_bfloat16_supported(),
         per_device_train_batch_size=2,  # Increased to work with num_generations
         gradient_accumulation_steps=1,
-        max_steps=500,  # We'll do our own loop, so set large
+        max_steps=150,  # We'll do our own loop, so set large
         max_grad_norm=0.3,
         num_generations=2,         # Must be divisible by batch size
         max_prompt_length=1024,    # Adjust if needed
