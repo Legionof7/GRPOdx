@@ -23,9 +23,9 @@ logger = logging.getLogger(__name__)
 
 # Adjust these as needed for your training
 MAX_TURNS = 5       # Max Doctor–Patient exchanges
-NUM_STEPS = 1      # How many outer loops of scenario generation & training
+NUM_STEPS = 500      # How many outer loops of scenario generation & training
 SCENARIOS_PER_STEP = 1        # How many different patient scenarios per step
-COMPLETIONS_PER_SCENARIO = 1  # Number of completions to compute advantage
+COMPLETIONS_PER_SCENARIO = 5  # Number of completions to compute advantage
 OPENAI_API_MODEL = "gpt-4o-mini"    # or "gpt-4o-mini" if available
 
 # Prompts
@@ -64,7 +64,7 @@ based on:
 2) Whether the final diagnosis matches {revealed_disease},
 3) Quality and relevance of Doctor's questions.
 
-If the diagnosis is partially correct, give partial credit. If no diagnosis is given, heavily penalize this. In addition, penalize the score if the <reasoning> tags aren't properly formatted or used.
+If the diagnosis is partially correct, give partial credit. If no diagnosis is given, heavily penalize this. In addition, penalize the score if the <reasoning> tags aren't properly formatted or used. Give an additional reward for reaching a correct diagnosis quickly (anything less than 4 questions can begin getting a bonus).
 Write any explanation after the numeric score, but the first float you mention is the official score.
 
 Conversation:
@@ -221,7 +221,7 @@ def generate_doctor_turn(
     conversation_no_reason: List[Dict[str, str]],
     turn_idx: int,
     max_turns: int,
-    temperature=0.7
+    temperature=0.9
 ) -> Tuple[str, str]:
     """
     Produces a single Doctor turn from the local model, returning:
@@ -432,7 +432,7 @@ async def main(openai_api_key: str):
         fp16=not is_bfloat16_supported(),
         per_device_train_batch_size=2,  # Increased to work with num_generations
         gradient_accumulation_steps=1,
-        max_steps=1,  # We'll do our own loop, so set large
+        max_steps=500,  # We'll do our own loop, so set large
         max_grad_norm=0.3,
         num_generations=2,         # Must be divisible by batch size
         max_prompt_length=1024,    # Adjust if needed
