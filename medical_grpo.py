@@ -175,7 +175,8 @@ Conversation so far:
         """
         prompt = self.build_doctor_prompt()
         outs = doctor_model.fast_generate([prompt], sampling_params=sampling_params)
-        full_doctor_text = outs[0]  # includes <reason> plus visible text
+        # In vLLM, the output has a specific structure - extract the generated text
+        full_doctor_text = outs[0].outputs[0].text  # includes <reason> plus visible text
 
         doc_visible = remove_reason_tags(full_doctor_text)
 
