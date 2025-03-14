@@ -87,7 +87,7 @@ def load_doctor_model(model_name: str = "unsloth/Phi-4",
         gpu_memory_utilization=0.9,
     )
     logger.info("Applying LoRA...")
-    model = FastLanguageModel.get_peft_model(
+        model = FastLanguageModel.get_peft_model(
         model,
         r=lora_rank,
         target_modules=["q_proj","k_proj","v_proj","o_proj",
@@ -383,11 +383,11 @@ async def main(openai_api_key: str):
         logging_steps=1,  # log every step
         bf16=is_bfloat16_supported(),
         fp16=not is_bfloat16_supported(),
-        per_device_train_batch_size=1,
+        per_device_train_batch_size=2,  # Increased to work with num_generations
         gradient_accumulation_steps=1,
         max_steps=999999,  # We'll do our own loop, so set large
         max_grad_norm=0.3,
-        num_generations=1,         # We'll do custom multi-completions per scenario
+        num_generations=2,         # Must be divisible by batch size
         max_prompt_length=1024,    # Adjust if needed
         max_completion_length=1024,
         save_steps=999999,         # We'll do custom saving
