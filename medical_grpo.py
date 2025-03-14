@@ -258,7 +258,8 @@ async def main(openai_api_key: str):
             # This becomes the "prompt." We'll also store "disease" so the reward_func sees it.
             data_rows.append({
                 "prompt": [
-                    {"role": "system", "content": full_prompt}
+                    {"role": "system", "content": "You are a medical diagnostic assistant."},
+                    {"role": "user", "content": full_prompt}  # Changed from system to user role
                 ],
                 "disease": disease  # used by the reward func
             })
