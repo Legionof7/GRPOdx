@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Doctor–Patient GRPO Example with Unsloth, fixed KeyError on 'prompt'.
+Doctor–Patient GRPO Example with Unsloth, logs each conversation to a CSV.
 """
 
 ###########################
@@ -15,11 +15,14 @@ import random
 import re
 import pandas as pd
 from datasets import Dataset
+import os
 
 # TRL & utility
-from trl import GRPOConfig, maybe_apply_chat_template, apply_chat_template
-from trl.trainer.grpo_trainer import pad
+from trl import GRPOConfig, maybe_apply_chat_template
 from accelerate.utils import broadcast_object_list, gather_object, set_seed
+
+# For logging conversations as text
+import datetime
 
 print("Imports complete.")
 
@@ -110,8 +113,8 @@ class DoctorGame:
 
     def __init__(self):
         self.hidden_disease = random.choice(COMMON_DISEASES)
-        self.conv_no_reason = []
-        self.conv_with_reason = []
+        self.conv_no_reason = []    # conversation visible to the Patient
+        self.conv_with_reason = []  # includes <reason> blocks
         self.turn_count = 0
         self.done = False
 
@@ -175,7 +178,7 @@ Conversation so far:
         """
         prompt = self.build_doctor_prompt()
         outs = doctor_model.fast_generate([prompt], sampling_params=sampling_params)
-        # In vLLM, the output has a specific structure - extract the generated text
+        # For vLLM, outs is a list of RequestOutput objects. We want the text:
         full_doctor_text = outs[0].outputs[0].text  # includes <reason> plus visible text
 
         doc_visible = remove_reason_tags(full_doctor_text)
@@ -203,6 +206,7 @@ Conversation so far:
         """
         Main conversation loop up to MAX_TURNS or final diagnosis.
         Then compute partial-credit reward in [0..1].
+        Return that final reward, plus the conversation logs.
         """
         while not self.done and self.turn_count < MAX_TURNS:
             self.turn_count += 1
@@ -210,7 +214,8 @@ Conversation so far:
             if not self.done:
                 self.step_patient()
 
-        return self.compute_reward()
+        final_reward = self.compute_reward()
+        return final_reward
 
     def compute_reward(self) -> float:
         """
@@ -231,6 +236,7 @@ Conversation so far:
         disease_lower = self.hidden_disease.lower()
         if guess_lower == disease_lower:
             return 1.0
+        # partial match?
         if guess_lower in disease_lower or disease_lower in guess_lower:
             return 0.8
         return 0.0
@@ -243,22 +249,20 @@ def doctor_game_reward(prompts, completions, **kwargs) -> list[float]:
     """
     A stub returning 0.0 for each text. We'll rely on the custom 
     multi-turn logic to compute the real reward. 
-    This is just to satisfy TRL's interface function signature.
+    This is just to satisfy TRL's interface if needed.
     """
     return [0.0] * len(prompts)
 
 
 ###########################
-# 4. Custom Trainer
+# 4. Custom Trainer w/ Logging
 ###########################
 class DoctorGRPOTrainer:
     """
-    Minimal demonstration of a custom trainer that:
-      - For each training step, runs a multi-turn "DoctorGame"
-      - Gathers the final reward
-      - (Normally you'd do advantage-based RL updates)
-
-    We fix the KeyError by wrapping messages in {"messages": messages}.
+    - For each training step, runs a multi-turn "DoctorGame"
+    - Gathers the final reward
+    - Logs the conversation details
+    - (Normally you'd do advantage-based RL updates)
     """
 
     def __init__(self, model, tokenizer, reward_funcs, args, train_dataset):
@@ -274,10 +278,14 @@ class DoctorGRPOTrainer:
         self.save_steps = args.save_steps
         self.logging_steps = args.logging_steps
 
+        # We'll store each conversation in memory to log at the end
+        self.episodes_log = []
+
     def _make_prompt(self, example) -> str:
         """
         Convert a dataset row into an initial prompt for the Doctor.
-        Must pass a dict with key "messages" to maybe_apply_chat_template.
+        Must pass a dict with key "messages" to maybe_apply_chat_template
+        so it returns a combined "prompt".
         """
         system_prompt = """System:
 You are an AI Doctor. You must produce <reason>...</reason> 
@@ -292,11 +300,8 @@ do so.
             {"role": "user",   "content": user_content},
         ]
 
-        # Wrap in a dict with "messages" => recognized as conversation
         conversation_dict = {"messages": messages}
-
         out = maybe_apply_chat_template(conversation_dict, self.tokenizer)
-        # Some versions might return out["prompt"], others out["text"]. Let's be safe:
         if "prompt" in out:
             prompt_text = out["prompt"]
         elif "text" in out:
@@ -305,26 +310,15 @@ do so.
             raise ValueError("maybe_apply_chat_template did not return 'prompt' or 'text'.")
         return prompt_text
 
-    def _multi_turn_generation(self, prompt: str):
-        """
-        Runs the multi-turn scenario, returns final reward, 
-        plus a dummy list of token IDs for the 'completion'.
-        """
-        scenario = DoctorGame()
-        final_reward = scenario.run_episode(self.model)
-        # In real code, you'd store actual token IDs. Here we just return dummy.
-        completion_ids = [0, 1, 2]
-        return completion_ids, final_reward
-
     def train(self):
         """
-        Very simplified training loop:
+        Simplified training loop:
          - We'll do self.max_steps steps
          - Sample from train_dataset
          - Build prompt
          - Run multi-turn generation
-         - Retrieve final reward
-         - (In real code, do advantage-based updates)
+         - Log conversation & final reward
+         - (Real code: advantage-based RL updates)
         """
         for step in range(self.max_steps):
             # pick random row
@@ -332,10 +326,35 @@ do so.
             prompt = self._make_prompt(ex)
 
             # multi-turn conversation
-            completion_ids, game_reward = self._multi_turn_generation(prompt)
+            scenario = DoctorGame()
+            final_reward = scenario.run_episode(self.model)
 
-            # For demonstration, we just print reward
-            print(f"[Step {step+1}] final reward = {game_reward:.3f}")
+            # Store conversation logs
+            # scenario.conv_with_reason: full text including <reason>
+            # scenario.conv_no_reason: only visible text
+            # scenario.hidden_disease
+            # final_reward
+
+            # Flatten them into strings
+            conv_with_reason_str = "\n".join(
+                f"{turn['role'].title()}: {turn['content']}" 
+                for turn in scenario.conv_with_reason
+            )
+            conv_no_reason_str = "\n".join(
+                f"{turn['role'].title()}: {turn['content']}" 
+                for turn in scenario.conv_no_reason
+            )
+
+            self.episodes_log.append({
+                "step": step+1,
+                "hidden_disease": scenario.hidden_disease,
+                "reward": final_reward,
+                "conversation_with_reason": conv_with_reason_str,
+                "conversation_no_reason": conv_no_reason_str
+            })
+
+            # Print for quick view
+            print(f"[Step {step+1}] final reward = {final_reward:.3f}")
 
             if (step+1) % self.save_steps == 0:
                 print(f"[Step {step+1}] saving LoRA checkpoint.")
@@ -344,13 +363,23 @@ do so.
             self.state.global_step += 1
 
         print("Training finished!")
+
         # final save
         self.model.save_lora("./doctor_final_lora_checkpoint")
+
+        # Also log to a CSV for later inspection
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        logs_df = pd.DataFrame(self.episodes_log)
+        os.makedirs("./logs", exist_ok=True)
+        csv_path = f"./logs/doctor_episodes_{timestamp}.csv"
+        logs_df.to_csv(csv_path, index=False)
+        print(f"Saved conversation logs to {csv_path}")
 
 
 ###########################
 # 5. Configure & Build Trainer
 ###########################
+from trl import GRPOConfig
 
 training_args = GRPOConfig(
     use_vllm=True,
