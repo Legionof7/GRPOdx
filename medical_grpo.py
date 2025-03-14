@@ -70,8 +70,8 @@ DOCTOR_SYSTEM_PROMPT = """System:
 You are an AI Doctor trying to diagnose a patient's condition.
 
 IMPORTANT: 
-1. You MUST always include hidden reasoning in <reason>...</reason> tags.
-2. After your reasoning, provide a concise patient-friendly response.
+1. You MUST always include hidden reasoning in <reason>...</reason> tags BEFORE the patient response.
+2. After your reasoning, ask the patient a question to help diagnose their condition.
 3. Never reveal your reasoning in <reason> tags to the patient.
 4. You have a maximum of {max_turns} questions/exchanges.
 5. On your final turn, you MUST provide "Final diagnosis: <your diagnosis>" if you haven't already.
@@ -349,7 +349,7 @@ def generate_doctor_response(model, tokenizer, conversation, current_turn, tempe
     return response.outputs[0].text.strip()
 
 
-async def run_conversation_episode(doctor_model, tokenizer, openai_api_key: str) -> Tuple[List[Dict[str, str]], float]:
+async def run_conversation_episode(doctor_model, tokenizer, openai_api_key: str) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], float, str]:
     """
     Run a complete conversation episode between doctor and patient.
     
@@ -359,9 +359,15 @@ async def run_conversation_episode(doctor_model, tokenizer, openai_api_key: str)
         openai_api_key: OpenAI API key
         
     Returns:
-        Tuple of (conversation history, reward score)
+        Tuple of:
+        - conversation_with_reason: Full conversation history including <reason> blocks
+        - conversation_no_reason: Conversation with <reason> blocks removed (shown to patient)
+        - reward_score: Calculated reward for this conversation
+        - revealed_disease: The disease the patient was simulating
     """
-    conversation = []
+    # Per spec: maintain two separate conversation logs
+    conversation_with_reason = []  # Full conversation with <reason> tags
+    conversation_no_reason = []    # Filtered conversation shown to patient
     revealed_disease = None
     
     # First patient message (presenting complaint)
@@ -370,47 +376,68 @@ async def run_conversation_episode(doctor_model, tokenizer, openai_api_key: str)
         openai_api_key
     )
     
-    conversation.append({
+    # Add to both conversation logs (patient messages are identical in both)
+    patient_message = {
         "role": "patient",
         "content": first_patient_response
-    })
+    }
+    conversation_with_reason.append(patient_message)
+    conversation_no_reason.append(patient_message)
     
     # Run the conversation for MAX_TURNS or until a final diagnosis
     for turn in range(1, MAX_TURNS + 1):
-        # Doctor turn
+        # Doctor turn - generate response based on conversation_no_reason
+        # (doctor should only see what was visible to the patient)
         doctor_response = generate_doctor_response(
-            doctor_model, tokenizer, conversation, turn
+            doctor_model, tokenizer, conversation_no_reason, turn
         )
         
-        conversation.append({
+        # Add full response to conversation_with_reason
+        conversation_with_reason.append({
             "role": "doctor",
             "content": doctor_response
         })
+        
+        # Remove <reason> tags and add to conversation_no_reason
+        filtered_response = remove_reason_tags(doctor_response)
+        conversation_no_reason.append({
+            "role": "doctor",
+            "content": filtered_response
+        })
+        
+        # Log both versions for debugging
+        logger.info(f"DOCTOR TURN {turn}:")
+        logger.info(f"WITH REASON: {doctor_response}")
+        logger.info(f"NO REASON: {filtered_response}")
         
         # Check if final diagnosis was made
         if "final diagnosis:" in doctor_response.lower():
             # Get revealed disease from patient
             _, revealed_disease = await get_patient_response(
-                conversation, openai_api_key
+                conversation_no_reason, openai_api_key
             )
             break
         
         # Patient turn (if not the final turn)
         if turn < MAX_TURNS:
+            # Patient only sees conversation_no_reason (without <reason> tags)
             patient_response, _ = await get_patient_response(
-                conversation, openai_api_key
+                conversation_no_reason, openai_api_key
             )
             
-            conversation.append({
+            # Add patient response to both conversation logs
+            patient_message = {
                 "role": "patient",
                 "content": patient_response
-            })
+            }
+            conversation_with_reason.append(patient_message)
+            conversation_no_reason.append(patient_message)
     
     # If we reached MAX_TURNS without a diagnosis, force final turn and get revealed disease
     if not revealed_disease:
-        if "final diagnosis:" not in conversation[-1]["content"].lower():
-            # Force final doctor turn with diagnosis
-            current_conversation = format_conversation(conversation, include_reason=False)
+        if "final diagnosis:" not in conversation_with_reason[-1]["content"].lower():
+            # Force final doctor turn with diagnosis - use conversation_no_reason for prompt
+            current_conversation = format_conversation(conversation_no_reason, include_reason=False)
             system_prompt = DOCTOR_SYSTEM_PROMPT.format(
                 max_turns=MAX_TURNS,
                 current_turn=MAX_TURNS,
@@ -436,33 +463,38 @@ async def run_conversation_episode(doctor_model, tokenizer, openai_api_key: str)
                 sampling_params=sampling_params,
             )[0].outputs[0].text.strip()
             
-            # Replace or add the final doctor turn
-            if conversation[-1]["role"] == "doctor":
-                conversation[-1]["content"] = final_response
+            # Replace or add the final doctor turn to both conversation logs
+            if conversation_with_reason[-1]["role"] == "doctor":
+                conversation_with_reason[-1]["content"] = final_response
+                conversation_no_reason[-1]["content"] = remove_reason_tags(final_response)
             else:
-                conversation.append({
+                conversation_with_reason.append({
                     "role": "doctor",
                     "content": final_response
                 })
+                conversation_no_reason.append({
+                    "role": "doctor", 
+                    "content": remove_reason_tags(final_response)
+                })
         
-        # Get revealed disease
+        # Get revealed disease - use conversation_no_reason
         _, revealed_disease = await get_patient_response(
-            conversation, openai_api_key
+            conversation_no_reason, openai_api_key
         )
     
-    # Calculate reward
+    # Calculate reward using conversation_with_reason (including <reason> blocks)
     reward = await get_reward_score(
-        conversation, revealed_disease, openai_api_key
+        conversation_with_reason, revealed_disease, openai_api_key
     )
     
     logger.info(f"Episode completed. Revealed disease: {revealed_disease}, Reward: {reward}")
     
-    return conversation, reward
+    return conversation_with_reason, conversation_no_reason, reward, revealed_disease
 
 
 async def generate_batch_data(doctor_model, tokenizer, openai_api_key, batch_size=2, completions_per_scenario=4):
     """
-    Generate batch data for GRPO training.
+    Generate batch data for GRPO training through self-play.
     
     Args:
         doctor_model: The doctor model
@@ -481,26 +513,38 @@ async def generate_batch_data(doctor_model, tokenizer, openai_api_key, batch_siz
     for scenario_idx in range(batch_size):
         logger.info(f"Starting scenario {scenario_idx+1}/{batch_size}")
         scenario_completions = []
+        scenario_diseases = []
+        
+        # Same patient/disease for all completions in a scenario (as per spec)
+        patient_initial_input = None
         
         # Run multiple completions for the same scenario
         for completion_idx in range(completions_per_scenario):
             logger.info(f"Running completion {completion_idx+1}/{completions_per_scenario} for scenario {scenario_idx+1}")
             
-            conversation, reward = await run_conversation_episode(
+            # Run a complete conversation episode
+            conversation_with_reason, conversation_no_reason, reward, disease = await run_conversation_episode(
                 doctor_model, tokenizer, openai_api_key
             )
             
+            # Store the disease for this scenario
+            scenario_diseases.append(disease)
+            
             # Print the conversation and reward
             logger.info(f"\n{'='*80}\nScenario {scenario_idx+1}, Completion {completion_idx+1}")
+            logger.info(f"DISEASE: {disease}")
             logger.info(f"Conversation:")
-            for turn in conversation:
+            
+            # Show the conversation with reasoning for debugging
+            for turn in conversation_with_reason:
                 role = turn['role'].upper()
                 content = turn['content']
-                # Display full conversation content
                 logger.info(f"{role}: {content}")
+            
             logger.info(f"REWARD: {reward:.4f}\n{'='*80}")
             
-            scenario_completions.append((conversation, reward))
+            # Store the completion data (using conversation_with_reason per spec)
+            scenario_completions.append((conversation_with_reason, reward))
         
         # Calculate advantages based on average reward for this scenario
         rewards = [completion[1] for completion in scenario_completions]
@@ -508,13 +552,14 @@ async def generate_batch_data(doctor_model, tokenizer, openai_api_key, batch_siz
         advantages = [reward - avg_reward for reward in rewards]
         
         logger.info(f"Scenario {scenario_idx+1} complete")
+        logger.info(f"Disease(s): {scenario_diseases}")
         logger.info(f"Rewards: {rewards}")
         logger.info(f"Average reward: {avg_reward:.4f}")
         logger.info(f"Advantages: {advantages}")
         
         # Format data for GRPO trainer
         for (conversation, reward), advantage in zip(scenario_completions, advantages):
-            # Format into a single text for GRPO
+            # Format into a single text for GRPO - use conversation_with_reason for training
             formatted_text = format_conversation(conversation, include_reason=True)
             batch_data.append((formatted_text, advantage))
             logger.info(f"Added training example with reward {reward:.4f} and advantage {advantage:.4f}")
@@ -707,7 +752,7 @@ def setup_grpo_trainer(doctor_model, tokenizer, train_dataset=None):
 
 
 async def main(openai_api_key):
-    """Main training loop"""
+    """Main training loop for medical GRPO self-play"""
     # Set up handlers only if they don't exist yet
     if not logger.handlers:
         # Add a single stream handler
@@ -725,68 +770,81 @@ async def main(openai_api_key):
     # Load model
     doctor_model, tokenizer = load_doctor_model()
     
-    # Create a very small dataset for easier debugging
-    from datasets import Dataset
-    debug_dataset = create_medical_dataset(num_samples=5 if DEBUG_MODE else 10)
-    
-    # Print some examples from the dataset
-    logger.info(f"Created dataset with {len(debug_dataset)} examples. Sample prompts:")
-    for i in range(min(3, len(debug_dataset))):
-        prompt = debug_dataset[i]['prompt']
-        system = prompt[0]['content'] if len(prompt) > 0 else "No system prompt"
-        user = prompt[1]['content'] if len(prompt) > 1 else "No user prompt"
-        logger.info(f"Example {i}:")
-        logger.info(f"  System: {system}")
-        logger.info(f"  User: {user}")
-    
-    # Setup GRPO trainer with static dataset
-    logger.info("Setting up GRPO trainer with static dataset")
-    trainer = setup_grpo_trainer(doctor_model, tokenizer, train_dataset=debug_dataset)
-    
-    # Add a proper callback that implements all required methods
-    from transformers.trainer_callback import TrainerCallback
-    
-    class LoggingCallback(TrainerCallback):
-        def on_train_begin(self, args, state, control, **kwargs):
-            logger.info("Training begins!")
-            return control
-            
-        def on_step_begin(self, args, state, control, **kwargs):
-            return control
-            
-        def on_step_end(self, args, state, control, **kwargs):
-            if state.global_step % 1 == 0:
-                # Format the log message
-                log_msg = f"Step {state.global_step}"
-                if hasattr(state, 'train_loss'):
-                    log_msg += f", loss={state.train_loss:.6f}"
-                if 'reward' in kwargs:
-                    log_msg += f", reward={kwargs['reward']}"
-                logger.info(log_msg)
-            return control
-            
-        def on_train_end(self, args, state, control, **kwargs):
-            logger.info(f"Training ended with {state.global_step} steps completed")
-            return control
-    
-    # Train the model using trl's GRPOTrainer
-    logger.info("Starting GRPO training using trainer.train()")
-    trainer.add_callback(LoggingCallback())
-    
-    trainer.train()
-    
-    # Save the final model
-    checkpoint_path = "doctor_final_model"
-    doctor_model.save_pretrained(checkpoint_path)
-    logger.info(f"Training completed. Final model saved to {checkpoint_path}")
-    
-    if False:  # Keep the alternative approach available but disabled
-        # Alternative approach: on-the-fly data generation with OpenAI API
-        logger.info("Starting GRPO training with on-the-fly data generation")
+    # Choose training approach based on DEBUG_MODE
+    if DEBUG_MODE:
+        # IN DEBUG MODE: Use static dataset for faster testing
+        logger.info("DEBUG MODE: Using static dataset for GRPO training")
+        from datasets import Dataset
+        debug_dataset = create_medical_dataset(num_samples=5)
+        
+        # Print some examples from the dataset
+        logger.info(f"Created dataset with {len(debug_dataset)} examples. Sample prompts:")
+        for i in range(min(3, len(debug_dataset))):
+            prompt = debug_dataset[i]['prompt']
+            system = prompt[0]['content'] if len(prompt) > 0 else "No system prompt"
+            user = prompt[1]['content'] if len(prompt) > 1 else "No user prompt"
+            logger.info(f"Example {i}:")
+            logger.info(f"  System: {system}")
+            logger.info(f"  User: {user}")
+        
+        # Setup GRPO trainer with static dataset
+        logger.info("Setting up GRPO trainer with static dataset")
+        trainer = setup_grpo_trainer(doctor_model, tokenizer, train_dataset=debug_dataset)
+        
+        # Add a proper callback that implements all required methods
+        from transformers.trainer_callback import TrainerCallback
+        
+        class LoggingCallback(TrainerCallback):
+            def on_train_begin(self, args, state, control, **kwargs):
+                logger.info("Training begins!")
+                return control
+                
+            def on_step_begin(self, args, state, control, **kwargs):
+                return control
+                
+            def on_step_end(self, args, state, control, **kwargs):
+                if state.global_step % 1 == 0:
+                    # Format the log message
+                    log_msg = f"Step {state.global_step}"
+                    if hasattr(state, 'train_loss'):
+                        log_msg += f", loss={state.train_loss:.6f}"
+                    if 'reward' in kwargs:
+                        log_msg += f", reward={kwargs['reward']}"
+                    logger.info(log_msg)
+                return control
+                
+            def on_train_end(self, args, state, control, **kwargs):
+                logger.info(f"Training ended with {state.global_step} steps completed")
+                return control
+        
+        # Train the model using trl's GRPOTrainer
+        logger.info("Starting GRPO training using trainer.train()")
+        trainer.add_callback(LoggingCallback())
+        
+        trainer.train()
+        
+        # Save the debug model
+        checkpoint_path = "doctor_debug_model"
+        doctor_model.save_pretrained(checkpoint_path)
+        logger.info(f"Debug training completed. Model saved to {checkpoint_path}")
+        
+    else:
+        # PRODUCTION MODE: Use on-the-fly self-play data generation (per spec)
+        logger.info("PRODUCTION MODE: Using self-play data generation for GRPO training")
+        
+        # Setup GRPO trainer without a dataset (we'll feed data on the fly)
+        trainer = setup_grpo_trainer(doctor_model, tokenizer)
+        
+        # Track training stats
+        total_episodes = 0
+        total_reward = 0.0
+        best_reward = 0.0
+        
+        # Main training loop
         for step in range(MAX_STEPS):
             logger.info(f"Starting training step {step+1}/{MAX_STEPS}")
             
-            # Generate batch data
+            # Generate batch data through self-play
             batch_data = await generate_batch_data(
                 doctor_model, 
                 tokenizer, 
@@ -794,6 +852,21 @@ async def main(openai_api_key):
                 batch_size=BATCH_SIZE,
                 completions_per_scenario=NUM_GENERATIONS
             )
+            
+            # Calculate average reward for this batch
+            batch_rewards = []
+            for text, advantage in batch_data:
+                if hasattr(advantage, 'reward'):  # If advantage object has reward attribute
+                    batch_rewards.append(advantage.reward)
+            
+            if batch_rewards:
+                avg_reward = sum(batch_rewards) / len(batch_rewards)
+                total_episodes += len(batch_rewards)
+                total_reward += sum(batch_rewards)
+                best_reward = max(best_reward, max(batch_rewards))
+                
+                logger.info(f"Batch stats - Avg reward: {avg_reward:.4f}, Best: {max(batch_rewards):.4f}")
+                logger.info(f"Overall stats - Avg reward: {total_reward/total_episodes:.4f}, Best: {best_reward:.4f}")
             
             # Train on batch
             trainer.train_on_records(batch_data)
@@ -805,7 +878,7 @@ async def main(openai_api_key):
                 logger.info(f"Saved checkpoint to {checkpoint_path}")
         
         # Save final model
-        doctor_model.save_pretrained("doctor_final_model_dynamic")
+        doctor_model.save_pretrained("doctor_final_model")
         logger.info("Training completed. Final model saved.")
 
 
