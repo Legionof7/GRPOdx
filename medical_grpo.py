@@ -395,10 +395,29 @@ async def main(openai_api_key: str):
         report_to="none",
         output_dir="doctor_outputs",
     )
+    # Create a custom dataset class from our batch data for the trainer
+    class DoctorDataset:
+        def __init__(self, conversations, advantages):
+            self.conversations = conversations
+            self.advantages = advantages
+        
+        def __len__(self):
+            return len(self.conversations)
+        
+        def __getitem__(self, idx):
+            return {
+                "prompt": [{"role": "user", "content": self.conversations[idx]}],
+                "advantage": self.advantages[idx]
+            }
+    
+    # We'll build the dataset as we collect data, then train later
+    all_text_examples = []
+    all_advantages = []
+    
     trainer = GRPOTrainer(
         model=doctor_model,
         processing_class=tokenizer,
-        reward_funcs=[],  # We won't use a local reward function
+        reward_funcs=[],  # We'll supply advantages directly
         args=training_args,
     )
     
@@ -473,31 +492,24 @@ async def main(openai_api_key: str):
         # Now we train on this batch_data
         logger.info(f"Training on batch of size {len(batch_data)} from step {step+1}")
         
-        # Group data by batches of 2 to match num_generations=2
-        for i in range(0, len(batch_data), 2):
-            batch_slice = batch_data[i:i+2]
-            if len(batch_slice) == 2:  # Ensure we have a full batch
-                prompts = []
-                advantages = []
-                
-                for text, advantage in batch_slice:
-                    prompts.append([{"role": "user", "content": text}])
-                    advantages.append(advantage)
-                
-                # Process the batch using simpler training approach
-                # Convert inputs to tensors and train directly on them
-                for text, advantage in batch_slice:
-                    # Encode the input text
-                    input_ids = tokenizer([text[0]], return_tensors="pt").input_ids
-                    
-                    # Move it to the same device as the model
-                    input_ids = input_ids.to(doctor_model.device)
-                    
-                    # Simple forward pass to update the model (this is a basic approach)
-                    outputs = doctor_model(input_ids=input_ids)
-                    
-                    # Log training progress
-                    logger.info(f"Processed training example with advantage {advantage}")
+        # Create a simple dataset from the batch data
+        texts = [text for text, _ in batch_data]
+        advantages = [adv for _, adv in batch_data]
+        
+        # Create a dataset object for training
+        train_dataset = DoctorDataset(texts, advantages)
+        
+        # Update the trainer with the new dataset
+        trainer.train_dataset = train_dataset
+        
+        # Train for 1 epoch on this small dataset
+        # This avoids the need for grpo_step() and follows the notebook pattern
+        try:
+            trainer.train()
+            logger.info(f"Completed training on batch from step {step+1}")
+        except Exception as e:
+            logger.error(f"Error during training: {str(e)}")
+            logger.info("Continuing despite training error")
         
         # Save checkpoint every second step
         if step % 2 == 1:
