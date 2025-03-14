@@ -87,7 +87,7 @@ def load_doctor_model(model_name: str = "unsloth/Phi-4",
         gpu_memory_utilization=0.9,
     )
     logger.info("Applying LoRA...")
-        model = FastLanguageModel.get_peft_model(
+    model = FastLanguageModel.get_peft_model(
         model,
         r=lora_rank,
         target_modules=["q_proj","k_proj","v_proj","o_proj",
