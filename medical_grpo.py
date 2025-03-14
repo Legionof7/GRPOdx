@@ -1,354 +1,504 @@
-#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Doctor–Patient GRPO with Unsloth"""
 
-import os
-import re
-import time
-import random
-import logging
-import asyncio
-import requests
-from typing import List, Dict, Any
+from unsloth import FastLanguageModel, PatchFastRL
+PatchFastRL("GRPO", FastLanguageModel)
 
-# Unsloth
-from unsloth import FastLanguageModel, is_bfloat16_supported
-# For the standard "Approach A" GRPO
-from trl import GRPOConfig, GRPOTrainer
-
-# We'll use "AsyncOpenAI" for calling GPT-4o-mini to generate scenario seeds + judge
-from openai import AsyncOpenAI
-
-# For the dataset
+from unsloth import is_bfloat16_supported
 from datasets import Dataset
+import torch
+import pandas as pd
+import re
+from collections import deque
 
-###############################################################################
-#                      CONFIG & GLOBAL CONSTANTS
-###############################################################################
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# For partial-credit scoring, etc.
+import random
 
-# Local doctor model name (on HF or local)
-LOCAL_DOCTOR_MODEL_NAME = "unsloth/Phi-4"  # or any Unsloth-compatible model
-# GPT-4o-mini or some other OpenAI-based small model
-JUDGE_MODEL = "gpt-4o-mini"
-SCENARIO_MODEL = "gpt-4o-mini"
+########################################
+# 1. LOADING THE DOCTOR MODEL w/ LoRA
+########################################
 
-NUM_OUTER_STEPS = 2     # how many times we gather new scenarios & train
-SCENARIOS_PER_LOOP = 10 # gather 10 new scenarios each loop
-MAX_TURNS = 5           # your instructions to the local model for how many doc/patient lines
-LR = 5e-6               # learning rate
-MAX_GLOBAL_STEPS = 100  # an upper bound for training steps
+model_name = "Qwen/Qwen2.5-1.5B-Instruct"  # Example base model
+max_seq_length = 2048
+lora_rank = 16
 
-###############################################################################
-#                           UTILITY FUNCTIONS
-###############################################################################
-async def generate_scenario_seed(openai_api_key: str) -> Dict[str, Any]:
-    """
-    Call GPT-4o-mini to produce a hidden disease and a short patient complaint.
-    We'll store them as a single string for the 'prompt' in our dataset.
-    The local model will see the instructions "Act out both patient & doctor"
-    but also we feed a hidden disease that it *should* reveal only at 'Final diagnosis:' line.
-    """
-    # Prompt GPT-4o-mini to pick a disease + complaint
-    scenario_prompt = (
-        "Pick a common disease (keep it hidden), then give a short opening line from the patient. "
-        "Output them in the format:\n"
-        "Disease: X\n"
-        "Complaint: Y\n"
-        "But do NOT reveal disease in the complaint line.\n"
-    )
-    client = AsyncOpenAI(api_key=openai_api_key)
-    resp = await client.chat.completions.create(
-        model=SCENARIO_MODEL,
-        messages=[{"role": "user", "content": scenario_prompt}],
-        max_tokens=100,
-        temperature=0.7,
-    )
-    text = resp.choices[0].message.content.strip()
-    # parse out lines
-    lines = text.split("\n")
-    disease = "unknown"
-    complaint = "I feel sick"
-    for line in lines:
-        if line.lower().startswith("disease:"):
-            disease = line.split(":",1)[1].strip()
-        elif line.lower().startswith("complaint:"):
-            complaint = line.split(":",1)[1].strip()
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name = model_name,
+    max_seq_length = max_seq_length,
+    load_in_4bit = True,         # 4-bit quant
+    fast_inference = True,       # vLLM backend
+    max_lora_rank = lora_rank,   # must be >= r
+    gpu_memory_utilization=0.5,
+)
 
-    # We'll store them so our local model can embed them in the system prompt
-    # e.g., "You are a doc+patient, the hidden disease is: X. The patient says: Y. Produce up to 5 doc/patient lines..."
-    # Then the local model must produce "Final diagnosis: X" at the end.
-    # (Yes, it's single-block self-play.)
-    scenario = {
-        "hidden_disease": disease,
-        "complaint": complaint
-    }
-    return scenario
+# Prepare LoRA
+model = FastLanguageModel.get_peft_model(
+    model,
+    r = lora_rank,
+    target_modules = [
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj"
+    ],
+    lora_alpha = lora_rank,
+    use_gradient_checkpointing = "unsloth",
+    random_state = 1234,
+)
 
-def build_prompt_for_local_model(disease: str, complaint: str, max_turns: int) -> str:
-    """
-    The text that the local model sees for a single scenario.
-    The model should produce both sides of the conversation in one go, 
-    then end with 'Final diagnosis: ...'
-    """
-    return f"""System:
-You will produce a simulated conversation between 
-(A) a patient with a hidden disease: {disease}, 
-and (B) you, the AI Doctor.
+# Optional sampling parameters
+from vllm import SamplingParams
+temperature = 0.7
+sampling_params = SamplingParams(
+    temperature = temperature,
+    top_p = 0.9,
+    max_tokens = 256,
+)
 
-You must produce up to {max_turns} pairs of lines (Doctor asks, Patient replies).
-At the end, you must say "Final diagnosis: <disease>" 
-matching the actual hidden disease: {disease}.
+########################################
+# 2. SCENARIO: DOCTOR–PATIENT
+########################################
 
-But do NOT reveal the hidden disease before the final line. 
-The patient part should reflect consistent symptoms for {disease}.
+"""
+We'll define a small class that simulates a single conversation episode.
 
-Begin. The patient's first complaint is:
-"{complaint}"
+We won't rely on a real GPT-4 or GPT-3.5 for the Patient, but you CAN swap in
+a real LLM call to mimic the patient. 
+For simplicity, let's pick from a small set of diseases randomly.
+
+We also define a method for the Doctor to produce a turn with <reason> blocks.
+Finally, we define the reward step that checks the final diagnosis (if any),
+computes partial credit, etc.
 """
 
-###############################################################################
-#                           REWARD FUNCTION
-###############################################################################
-async def judge_conversation(conversation: str, correct_disease: str, openai_api_key: str) -> float:
+# We'll define a small set of possible diseases
+COMMON_DISEASES = [
+    "Influenza",
+    "Common cold",
+    "Strep throat",
+    "COVID-19",
+    "Allergic rhinitis",
+    "Migraine",
+    "Mononucleosis",
+]
+
+MAX_TURNS = 5
+
+def remove_reason_tags(text: str) -> str:
     """
-    Calls GPT-4o-mini to judge:
-    1) If it concluded with "Final diagnosis: correct_disease" => good
-    2) If the conversation is coherent, etc.
-    Returns a float in [0..1].
-    We'll parse out the first float from GPT's response.
+    Remove <reason>...</reason> blocks from the Doctor's full text,
+    leaving only the visible text that the Patient can see.
     """
-    # We'll feed the entire conversation to GPT-4o-mini with instructions to rate it
-    prompt = f"""System:
-You are a judge for a medical conversation. 
-You see the entire conversation below. The hidden disease was: {correct_disease}.
+    return re.sub(r"<reason>.*?</reason>", "", text, flags=re.DOTALL)
 
-Rate from 0..1 how well this conversation:
-1) Provided coherent question/answer pairs,
-2) Ended with correct final diagnosis,
-3) Did not reveal the disease prematurely.
 
-Give the numeric score as the FIRST float in your reply. Explanation after if you like.
-
-Conversation:
-{conversation}
-"""
-    client = AsyncOpenAI(api_key=openai_api_key)
-    resp = await client.chat.completions.create(
-        model=JUDGE_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.0,
-        max_tokens=200
-    )
-    text = resp.choices[0].message.content
-    match = re.search(r"\b(\d*\.?\d+)\b", text)
+def parse_final_diagnosis(doctor_visible_text: str) -> str:
+    """
+    If the Doctor's visible text contains "Final diagnosis: XYZ",
+    return "XYZ" (the text after the colon).
+    Otherwise return empty string or None.
+    """
+    match = re.search(r"Final\s*diagnosis:\s*(.*)", doctor_visible_text, re.IGNORECASE)
     if match:
-        try:
-            val = float(match.group(1))
-            return max(0.0, min(1.0, val))
-        except:
-            pass
-    return 0.0
+        return match.group(1).strip()
+    return ""
 
-###############################################################################
-#          MAIN SCRIPT: GATHER SCENARIOS, BUILD DATASET, RUN TRAIN
-###############################################################################
-async def main(openai_api_key: str):
-    # 1) Load local doctor model
-    doctor_model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=LOCAL_DOCTOR_MODEL_NAME,
-        max_seq_length=2048,
-        load_in_4bit=True,
-        fast_inference=True,
-        gpu_memory_utilization=0.7,
-        enforce_eager=True,
-    )
-    # 2) Create a standard GRPO LoRA
-    doctor_model = FastLanguageModel.get_peft_model(
-        doctor_model,
-        r=8,
-        target_modules=["q_proj","k_proj","v_proj","o_proj",
-                        "gate_proj","up_proj","down_proj"],
-        lora_alpha=16,
-        lora_dropout=0.05,
-        use_gradient_checkpointing="unsloth",
-        bias="none",
-    )
 
-    # 3) Set up a GRPOTrainer in the standard “Approach A” style
-    config = GRPOConfig(
-        use_vllm=True,
-        learning_rate=LR,
-        adam_beta1=0.9,
-        adam_beta2=0.99,
-        weight_decay=0.0,
-        warmup_ratio=0.05,
-        lr_scheduler_type="cosine",
-        optim="paged_adamw_8bit",
-        logging_steps=1,
-        bf16=is_bfloat16_supported(),
-        fp16=not is_bfloat16_supported(),
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=1,
-        max_steps=MAX_GLOBAL_STEPS,  
-        max_grad_norm=0.3,
-        num_generations=2,   # how many completions per prompt
-        max_prompt_length=1024,
-        max_completion_length=1024,
-        save_steps=50,
-        report_to="none",
-        output_dir="grpo_outputs",
-    )
+class DoctorGame:
+    """
+    Multi-turn conversation scenario:
+    - The Patient picks a hidden disease.
+    - We keep track of the conversation in two logs: 
+        conv_with_reason (Doctor's hidden reasoning included),
+        conv_no_reason   (visible only).
+    - The Doctor tries to guess the disease within a fixed number of turns.
+    - At the end, we do partial credit scoring, returning a float [0..1].
+    """
 
-    # Create a fully synchronous reward function using requests instead of asyncio
-    def judge_conversation_sync(conversation, disease, api_key):
-        import requests
-        import json
-        
-        # Format a message to the reward model
-        prompt = f"""You are evaluating a conversation between a doctor and a patient.
-The patient has: {disease}
-The conversation is: {conversation}
-Rate the doctor's performance from 0 to 1, where:
-- 0 means completely incorrect diagnosis, poor questions, poor reasoning
-- 0.5 means somewhat reasonable diagnosis and questions, but could be better
-- 1 means perfect diagnosis, highly relevant questions, clear reasoning
-Use the following rating scale, and output ONLY A SINGLE FLOAT between 0 and 1:
+    def __init__(self):
+        # Patient picks a hidden disease
+        self.hidden_disease = random.choice(COMMON_DISEASES)
+
+        # Store the conversation as list of dicts: {"role": "doctor"|"patient", "content": ...}
+        self.conv_no_reason = []
+        self.conv_with_reason = []
+        self.turn_count = 0
+        self.done = False
+
+    def get_patient_reply(self, doctor_visible_text: str) -> str:
+        """
+        Very simplified "Patient" logic. 
+        In a real version, you might do a GPT call that:
+          1) sees the conversation so far (without Doctor's <reason>).
+          2) roleplays symptoms consistent with hidden_disease.
+        Here, we just give a trivial response or short symptom text for demonstration.
+        """
+        # If the Doctor specifically gave a final diagnosis, we stop, no further reply.
+        if "Final diagnosis:" in doctor_visible_text:
+            self.done = True
+            return ""
+
+        # Example: we can store a few "typical symptom lines" for each disease
+        disease_responses = {
+            "Influenza":      "I have a fever, chills, muscle aches, a cough, and fatigue.",
+            "Common cold":    "I have a runny nose, sneezing, slight cough, but no severe fever.",
+            "Strep throat":   "My throat is really sore, painful swallowing, maybe a mild fever.",
+            "COVID-19":       "I have a fever, cough, difficulty breathing, loss of taste, and fatigue.",
+            "Allergic rhinitis": "I have sneezing, itchy nose, watery eyes, no fever though.",
+            "Migraine":       "I have severe headache on one side, light sensitivity, some nausea.",
+            "Mononucleosis":  "I feel extreme fatigue, sore throat, swollen lymph nodes, maybe mild fever."
+        }
+        # Return a short symptom line
+        return disease_responses.get(self.hidden_disease, "I have some generic symptoms...")
+
+    def doctor_system_prompt(self):
+        """
+        A system prompt reminding the Doctor to produce hidden chain-of-thought 
+        and keep it out of the visible text.
+        """
+        return f"""System:
+You are an AI Doctor. You can make at most {MAX_TURNS} total replies.
+Each time you speak, you MUST include a hidden chain-of-thought 
+in the format <reason> ... </reason>.
+
+After the <reason> block, provide your visible text for the patient.
+
+Never reveal the text within <reason>.
+
+If by your final turn (turn {MAX_TURNS}) you haven't provided
+'Final diagnosis: <Disease>', do so on that turn and end.
+
+------
+
+Conversation so far:
 """
-        
-        # Make a synchronous OpenAI API call
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        }
-        payload = {
-            "model": OPENAI_API_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 50,
-            "temperature": 0.0
-        }
-        
-        try:
-            response = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers=headers,
-                json=payload
-            )
-            response_json = response.json()
-            text = response_json["choices"][0]["message"]["content"]
-            
-            # Extract the floating-point score (0..1)
-            match = re.search(r'(\d+\.\d+)', text)
-            if match:
-                try:
-                    score = float(match.group(1))
-                    # clamp to [0,1]
-                    score = max(0.0, min(1.0, score))
-                    return score
-                except:
-                    pass
-        except Exception as e:
-            logger.error(f"Error in reward function: {str(e)}")
-            
-        # Default if no valid score found
-        return 0.5
 
-    def sync_judge_func(prompts, completions, disease, **kwargs):
-        """Fully synchronous reward function that evaluates all completions"""
-        scores = []  # will be a list of scores, one per prompt
-        
-        # Convert diseases to a list if it's not already
-        if not isinstance(disease, list):
-            diseases = [disease] * len(prompts)
+    def build_doctor_prompt(self) -> str:
+        """
+        Build a single string prompt from conv_no_reason + system instructions.
+        We let the model continue from "Doctor: " at the end.
+        """
+        # Build the system text
+        prompt = self.doctor_system_prompt()
+
+        # Append the visible conversation
+        for turn in self.conv_no_reason:
+            role = turn["role"].title()  # Doctor or Patient
+            content = turn["content"]
+            prompt += f"{role}: {content}\n"
+        prompt += "Doctor:"  # we want the model's next line
+
+        return prompt
+
+    def step_doctor(self, doctor_model) -> float:
+        """
+        1) Build prompt for the Doctor (including system instructions + conv_no_reason).
+        2) The Doctor model outputs text that includes <reason> block plus visible text.
+        3) We parse out the visible text, store both versions.
+        4) If 'Final diagnosis:' present, we end the episode.
+
+        Return 0 as "reward" each step (the final reward is computed at the end).
+        """
+        # Create the prompt
+        prompt = self.build_doctor_prompt()
+        outputs = doctor_model.fast_generate([prompt], max_new_tokens=256, sampling_params=sampling_params)
+        full_doctor_text = outputs[0]  # includes <reason> ... plus visible text
+
+        # Remove reason tags to produce the visible text for the patient
+        doc_visible = remove_reason_tags(full_doctor_text)
+
+        # Store in both logs
+        self.conv_with_reason.append({"role": "doctor", "content": full_doctor_text})
+        self.conv_no_reason.append({"role": "doctor", "content": doc_visible})
+
+        # Check for final diagnosis
+        if "Final diagnosis:" in doc_visible:
+            self.done = True
+
+        return 0.0
+
+    def step_patient(self) -> float:
+        """
+        1) We see the last Doctor visible text from conv_no_reason.
+        2) The patient replies with some symptom line or final statement.
+        3) Store it in both logs (the same text, no <reason>).
+        """
+        # If we're done, no more patient turns
+        if self.done:
+            return 0.0
+
+        last_doc_visible = self.conv_no_reason[-1]["content"]
+        pat_reply = self.get_patient_reply(last_doc_visible)
+
+        # Add patient turn
+        self.conv_no_reason.append({"role": "patient", "content": pat_reply})
+        self.conv_with_reason.append({"role": "patient", "content": pat_reply})
+
+        return 0.0
+
+    def run_episode(self, doctor_model):
+        """
+        Simulate the entire conversation until done or MAX_TURNS. 
+        After finishing, reveal disease, compute partial-credit reward.
+        Return the reward.
+        """
+        self.turn_count = 0
+        while not self.done and self.turn_count < MAX_TURNS:
+            self.turn_count += 1
+            self.step_doctor(doctor_model)
+            if not self.done:
+                self.step_patient()
+
+        # The conversation is over. Let's compute final partial-credit reward.
+        final_score = self.compute_reward()
+        return final_score
+
+    def compute_reward(self) -> float:
+        """
+        We'll do a partial-credit approach:
+          - If the Doctor never gave a "Final diagnosis: X," reward = 0
+          - If the Doctor did, compare X with the hidden disease. 
+             * If exact match => 1.0
+             * If partial match or 'close' => e.g. 0.6 or 0.8
+             * Otherwise => 0.0
+        You can also factor in reasoning, thoroughness, etc. for bigger completions.
+        """
+        # Retrieve final diagnosis if any
+        doc_visible = ""
+        for turn in self.conv_no_reason:
+            if turn["role"] == "doctor":
+                d = parse_final_diagnosis(turn["content"])
+                if d:
+                    doc_visible = d  # keep the last final diagnosis if multiple
+
+        if not doc_visible:
+            # No final diagnosis => 0
+            return 0.0
+
+        # Compare final diagnosis to the hidden disease
+        guess = doc_visible.lower()
+        answer = self.hidden_disease.lower()
+
+        if guess == answer:
+            return 1.0
+        # do a naive partial match approach:
+        if guess in answer or answer in guess:
+            # e.g. "common cold" vs "cold"
+            return 0.8
         else:
-            diseases = disease
-            
-        for i, (prompt, completion_list, disease_value) in enumerate(zip(prompts, completions, diseases)):
-            # Process each completion for this prompt
-            local_scores = []
-            for c in completion_list:
-                text = c["content"]  # a single big string with the entire conversation
-                # call the synchronous judge
-                sc = judge_conversation_sync(text, disease_value, openai_api_key)
-                local_scores.append(sc)
-            
-            # Return the average for this prompt
-            scores.append(sum(local_scores)/len(local_scores))
-            
-        return scores
+            # no match
+            return 0.0
 
-    # We'll store a single function in reward_funcs:
-    # But we must pass 'disease' from the dataset. The trainer automatically passes any dataset fields
-    # that aren't named "prompt"/"completion" to the reward func as **kwargs.
-    reward_funcs = [sync_judge_func]
 
-    trainer = GRPOTrainer(
-        model=doctor_model,
-        processing_class=tokenizer,
-        reward_funcs=reward_funcs,
-        args=config,
-        train_dataset=None,  # We'll set it below
-        eval_dataset=None,
-    )
+########################################
+# 3. REWARD FUNCTION WRAPPER
+########################################
 
-    # We'll do multiple outer loops:
-    for step_idx in range(NUM_OUTER_STEPS):
-        logger.info(f"\n=== OUTER STEP {step_idx+1}/{NUM_OUTER_STEPS} ===")
-        # (A) Generate 10 scenario seeds from GPT-4o-mini
-        logger.info("Generating new scenario seeds...")
-        scenarios = []
-        for _ in range(SCENARIOS_PER_LOOP):
-            scenario = await generate_scenario_seed(openai_api_key)
-            scenarios.append(scenario)
+def doctor_game_reward(prompts, completions, **kwargs) -> list[float]:
+    """
+    We define a stub reward function that returns 0.0 for each completion. 
+    We'll rely on the *custom trainer* to actually run the multi-turn self-play 
+    and produce the final reward.
 
-        # (B) Build an HF Dataset from these scenarios
-        # We'll create "prompt" text that instructs the local model to produce the entire conversation
-        data_rows = []
-        for sc in scenarios:
-            disease = sc["hidden_disease"]
-            complaint = sc["complaint"]
-            full_prompt = build_prompt_for_local_model(disease, complaint, MAX_TURNS)
-            # This becomes the "prompt." We'll also store "disease" so the reward_func sees it.
-            data_rows.append({
-                "prompt": [
-                    {"role": "system", "content": "You are a medical diagnostic assistant."},
-                    {"role": "user", "content": full_prompt}  # Changed from system to user role
-                ],
-                "disease": disease  # used by the reward func
-            })
-        ds = Dataset.from_list(data_rows)
+    The reason: in a multi-turn environment, we can't do it purely from
+    the static prompt -> single completion. We do it ourselves in the custom logic.
 
-        # (C) Set trainer's dataset
-        trainer.train_dataset = ds
-        # (D) Train
-        # Because .train() calls the entire single-turn generation loop internally,
-        # it will produce completions (the entire multi-turn conversation),
-        # call sync_judge_func() -> judge_conversation(),
-        # compute advantage, do updates, etc.
-        logger.info("Beginning GRPO training on these new scenarios...")
-        trainer.train()
+    For compatibility, we define a function that returns a placeholder 0.0 for each example.
+    """
+    # We will handle the *true* game reward inside our custom multi-turn method,
+    # where we run the entire conversation. So return zeros here.
+    return [0.0 for _ in prompts]
 
-        # (E) Save a checkpoint
-        save_path = f"doctor_lora_outerstep_{step_idx+1}"
-        logger.info(f"Saving checkpoint to {save_path}")
-        doctor_model.save_pretrained(save_path)
 
-    # Done
-    logger.info("All steps complete. Saving final LoRA to doctor_lora_final")
-    doctor_model.save_pretrained("doctor_lora_final")
-    logger.info("Finished.")
+########################################
+# 4. CUSTOM GRPO TRAINER
+########################################
 
-###############################################################################
-#                           SCRIPT ENTRY
-###############################################################################
-if __name__ == "__main__":
-    import argparse
+from trl import GRPOConfig
+from trl.trainer.grpo_trainer import pad
+import os
+import torch
+import torch.nn as nn
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--openai_api_key", type=str, default=None, help="OpenAI API key")
-    args = parser.parse_args()
+from accelerate.utils import broadcast_object_list, gather_object, set_seed
 
-    key = args.openai_api_key or os.environ.get("OPENAI_API_KEY")
-    if not key:
-        raise ValueError("Please provide --openai_api_key or set OPENAI_API_KEY.")
-    
-    asyncio.run(main(key))
+# If you have the local file "UnslothGRPOTrainer.py" from the TTT example:
+# from UnslothGRPOTrainer import UnslothGRPOTrainer
+# Otherwise, we place the same class inline here in short form:
+
+from contextlib import nullcontext
+from trl.data_utils import is_conversational, maybe_apply_chat_template
+
+
+class DoctorGRPOTrainer:
+    """
+    A simplified example of a custom multi-turn trainer for the Doctor–Patient scenario.
+
+    Key differences from standard TRL:
+      1) We run multi-turn conversation in `_multi_turn_generation` with a custom game object (DoctorGame).
+      2) We gather the final reward from the game object.
+      3) We combine that with any additional reward functions if desired.
+
+    For demonstration only. You can adapt the TicTacToe code to fit the doctor scenario.
+    """
+
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        reward_funcs,
+        args,
+        train_dataset,
+    ):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.reward_funcs = reward_funcs  # e.g. [doctor_game_reward]
+        self.args = args
+        self.train_dataset = train_dataset
+
+        # Convert any needed config from GRPOConfig
+        self.max_prompt_length = args.max_prompt_length
+        self.max_completion_length = args.max_completion_length
+        self.num_generations = args.num_generations
+        self.sampling_params = sampling_params  # from above
+        self.state = type("", (), {})()  # mock
+        self.state.global_step = 0
+
+        # Reward weighting
+        # If we want to do partial weighting of each reward function:
+        #   e.g. [0.5, 0.5]. Must match len(reward_funcs).
+        self.reward_weights = torch.ones(len(reward_funcs))
+
+        # Just a demonstration, not a full trainer with all features
+        self.max_steps = args.max_steps
+        self.save_steps = args.save_steps
+
+    def train(self):
+        """
+        Minimal pseudo-training loop:
+          - Repeatedly sample from the dataset
+          - For each sample, run multi-turn conversation
+          - Compute reward -> advantage -> do GRPO step
+          - (We won't show the full gradient steps for brevity.)
+        """
+        for step in range(self.max_steps):
+            # sample a single example
+            # or batch?
+            example = self.train_dataset[random.randint(0, len(self.train_dataset)-1)]
+            # The prompt is basically "start scenario"
+            prompt = self._make_prompt(example)
+
+            # We'll do multi-turn generation, obtain final reward
+            completion_ids, game_reward = self._multi_turn_generation(prompt)
+
+            # Optionally combine with other reward functions if you have them
+            # For demonstration, we have just a single "doctor_game_reward" returning zeros, 
+            # so let's ignore them. We'll directly use `game_reward`.
+            total_reward = game_reward
+
+            # Now do advantage-based RL update with that single reward
+            # (In real code, you want multiple completions and compute average for advantage.)
+            advantage = total_reward  # minus baseline, etc. (extremely simplified)
+
+            # Then you'd call something like: self._update_model(completion_ids, advantage)
+            # For brevity, we won't detail the entire forward/backward pass.
+            # We'll just print something.
+            if (step+1) % self.args.logging_steps == 0:
+                print(f"[Step {step+1}] reward={total_reward:.3f}, advantage={advantage:.3f}")
+
+            if (step+1) % self.save_steps == 0:
+                print(f"[Step {step+1}] saving model checkpoint (LoRA).")
+                self.model.save_lora(f"./doctor_lora_checkpoint_step{step+1}")
+
+    def _make_prompt(self, example) -> str:
+        """
+        Convert a dataset row into an initial prompt for the Doctor.
+        In many cases, the dataset might hold just a "dummy" prompt
+        or scenario text. Here, we demonstrate it simply.
+        """
+        # We'll store a short user instruction: "Begin diagnosing me!"
+        # In real usage, you might have more context in the dataset row.
+        user_content = "I have come to see you for a diagnosis. Please help me figure out what's wrong."
+        system_prompt = f"""System:
+You are an AI Doctor. Always produce <reason>...</reason> for your hidden chain-of-thought.
+Then produce visible text for the patient. If you haven't reached a final diagnosis by turn {MAX_TURNS}, 
+output "Final diagnosis: <some disease>" on your last turn.
+"""
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content}
+        ]
+        # Convert to a single text prompt
+        # We'll rely on the built-in chat template if you like
+        prompt_text = maybe_apply_chat_template(messages, self.tokenizer)["prompt"]
+        return prompt_text
+
+    def _multi_turn_generation(self, prompt):
+        """
+        Runs the multi-turn conversation using the DoctorGame environment.
+        Returns the final sequence of token IDs (for the entire conversation)
+        and the final numeric reward from the scenario.
+        """
+        # Initialize the scenario
+        scenario = DoctorGame()
+
+        # We'll emulate a "starting conversation" by adding the user message 
+        # into scenario's logs. But for simplicity, we skip that detail 
+        # (the scenario actually starts blank, and the system prompt is inside 
+        #  the final generate call).
+        # If you want to incorporate the initial user message into scenario's conv_no_reason, do so.
+
+        # We'll run the entire scenario: scenario.run_episode(self.model)
+        # This method internally calls scenario.step_doctor -> scenario.step_patient, etc.
+        # Returns final partial-credit reward
+        final_reward = scenario.run_episode(self.model)
+
+        # For the *trainer*, we typically need a final sequence of token IDs.
+        # Since we're using multi-turn generation calls, let's just produce a 
+        # single placeholder for completion_ids:
+        completion_ids = [0, 1, 2]  # dummy (in practice you'd store all tokens if needed)
+
+        return completion_ids, final_reward
+
+
+########################################
+# 5. CONFIG & DATASET
+########################################
+
+from trl import GRPOConfig
+
+training_args = GRPOConfig(
+    use_vllm = True,
+    learning_rate = 5e-6,
+    temperature = temperature,
+    logging_steps = 1,
+    max_steps = 10,       # for demo
+    save_steps = 5,
+    max_prompt_length = 1024,
+    max_completion_length = 512,
+    num_generations = 1,   # We'll do 1 generation at a time in this simple demo
+    output_dir = "./doctor_lora_output",
+)
+
+# Minimal dataset example: 
+# We only need a placeholder row with a prompt, or no prompt, 
+# because each scenario is generated at runtime.
+df = pd.DataFrame([{"id": i, "text": "dummy scenario"} for i in range(10)])
+train_dataset = Dataset.from_pandas(df)
+
+########################################
+# 6. TRAIN
+########################################
+
+trainer = DoctorGRPOTrainer(
+    model=model,
+    tokenizer=tokenizer,
+    reward_funcs=[doctor_game_reward],
+    args=training_args,
+    train_dataset=train_dataset,
+)
+
+trainer.train()
+
+# Finally, save the LoRA
+model.save_lora("./doctor_final_lora_checkpoint")
+
+print("Training complete! LoRA saved.")
