@@ -23,9 +23,9 @@ logger = logging.getLogger(__name__)
 
 # Adjust these as needed for your training
 MAX_TURNS = 5       # Max Doctor–Patient exchanges
-NUM_STEPS = 1      # How many outer loops of scenario generation & training
+NUM_STEPS = 500      # How many outer loops of scenario generation & training
 SCENARIOS_PER_STEP = 1        # How many different patient scenarios per step
-COMPLETIONS_PER_SCENARIO = 1  # Number of completions to compute advantage
+COMPLETIONS_PER_SCENARIO = 5  # Number of completions to compute advantage
 OPENAI_API_MODEL = "gpt-4o-mini"    # or "gpt-4o-mini" if available
 
 # Prompts
@@ -64,7 +64,7 @@ based on:
 2) Whether the final diagnosis matches {revealed_disease},
 3) Quality and relevance of Doctor's questions.
 
-If the diagnosis is partially correct, give partial credit. 
+If the diagnosis is partially correct, give partial credit. If no diagnosis is given, heavily penalize this.
 Write any explanation after the numeric score, but the first float you mention is the official score.
 
 Conversation:
@@ -288,9 +288,22 @@ async def run_selfplay_episode(
       - conversation_with_reason (list of turns, includes <reason> in Doctor turns)
       - final_reward (float)
     """
+    # Create conversation log file
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file = f"training_episode_{episode_id}_{timestamp}.txt"
+    
     logger.info(f"Starting episode #{episode_id}")
+    logger.info(f"Saving conversation to: {output_file}")
     conversation_no_reason = []
     conversation_with_reason = []
+    
+    # Initialize conversation log file
+    with open(output_file, "w") as f:
+        f.write(f"=== DOCTOR-PATIENT TRAINING EPISODE #{episode_id} ===\n")
+        f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Max turns: {max_turns}\n")
+        f.write("="*50 + "\n\n")
     
     # First, we ask the patient for an initial statement
     # We treat "doctor" as role for a system-level "kick-off"
@@ -304,6 +317,11 @@ async def run_selfplay_episode(
     logger.info(f"Episode #{episode_id}: Patient initial: {patient_reply}")
     conversation_no_reason.append({"role": "patient", "content": patient_reply})
     conversation_with_reason.append({"role": "patient", "content": patient_reply})
+    
+    # Save initial patient statement to file
+    with open(output_file, "a") as f:
+        f.write("DOCTOR: Please describe your main symptom or complaint.\n\n")
+        f.write(f"PATIENT: {patient_reply}\n\n")
     
     # Conduct up to max_turns:
     for turn_idx in range(1, max_turns + 1):
@@ -320,6 +338,17 @@ async def run_selfplay_episode(
         conversation_with_reason.append({"role": "doctor", "content": full_doc})
         conversation_no_reason.append({"role": "doctor", "content": doc_visible})
         
+        # Save doctor response to file
+        with open(output_file, "a") as f:
+            # Extract reasoning if present
+            reasoning = ""
+            reasoning_match = re.search(r"<reason>(.*?)</reason>", full_doc, re.DOTALL)
+            if reasoning_match:
+                reasoning = reasoning_match.group(1).strip()
+                f.write(f"DOCTOR REASONING: {reasoning}\n\n")
+            
+            f.write(f"DOCTOR: {doc_visible}\n\n")
+        
         # Check if final diagnosis is in doc_visible:
         if "final diagnosis:" in doc_visible.lower():
             logger.info(f"Episode #{episode_id}: Final diagnosis detected, ending conversation")
@@ -332,6 +361,10 @@ async def run_selfplay_episode(
             logger.info(f"Episode #{episode_id}: Patient response: {pat_resp}")
             conversation_no_reason.append({"role": "patient", "content": pat_resp})
             conversation_with_reason.append({"role": "patient", "content": pat_resp})
+            
+            # Save patient response to file
+            with open(output_file, "a") as f:
+                f.write(f"PATIENT: {pat_resp}\n\n")
     
     # Conversation ended (either due to final dx or hitting max_turns).
     # Reveal the hidden disease from the patient side
@@ -344,6 +377,13 @@ async def run_selfplay_episode(
     reward = await get_conversation_reward(conversation_with_reason, revealed, openai_api_key)
     
     logger.info(f"Episode #{episode_id} finished. Disease = {revealed}, Reward = {reward:.4f}")
+    
+    # Save the disease reveal and reward to file
+    with open(output_file, "a") as f:
+        f.write("-"*50 + "\n\n")
+        f.write(f"ACTUAL DISEASE: {revealed}\n\n")
+        f.write(f"CONVERSATION REWARD: {reward:.4f}/1.0\n\n")
+        f.write("="*50 + "\n")
     
     # Print complete conversation for analysis
     logger.info(f"Episode #{episode_id}: Complete conversation:")
