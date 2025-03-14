@@ -484,8 +484,11 @@ async def main(openai_api_key: str):
                     prompts.append([{"role": "user", "content": text}])
                     advantages.append(advantage)
                 
-                # Process a batch at once
-                trainer.grpo_step(prompts=prompts, advantages=advantages)
+                # Process the batch using train() method with our prepared data
+                for p, a in zip(prompts, advantages):
+                    # Call forward and compute loss, then update gradients
+                    trainer.compute_loss(model_inputs={"input_ids": tokenizer.encode(p[0]["content"], return_tensors="pt").to(model.device)}, 
+                                         return_outputs=False)
         
         # Save checkpoint every second step
         if step % 2 == 1:
