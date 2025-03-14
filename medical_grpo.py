@@ -48,6 +48,9 @@ LEARNING_RATE = 5e-6
 MAX_STEPS = 1000
 SAVE_STEPS = 100
 BATCH_SIZE = 2
+# Debug constants
+DEBUG_MODE = True  # Set to True for faster debugging runs
+DEBUG_MAX_STEPS = 10  # Smaller number of steps for debugging
 
 # Patient system prompt template
 PATIENT_SYSTEM_PROMPT = """System:
@@ -553,14 +556,26 @@ def create_medical_dataset(num_samples=100):
     data = []
     for _ in range(num_samples):
         question = random.choice(medical_questions)
+        system_prompt = DOCTOR_SYSTEM_PROMPT.format(
+            max_turns=MAX_TURNS, 
+            current_turn=1, 
+            conversation=""
+        )
+        # Format for GRPO training - it needs both prompt and answer fields
         data.append({
             "prompt": [
-                {"role": "system", "content": DOCTOR_SYSTEM_PROMPT.format(max_turns=MAX_TURNS, current_turn=1, conversation="")},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": question}
             ],
+            # Add a dummy answer field - GRPO will generate actual completions
+            "answer": ""
         })
     
-    return Dataset.from_list(data)
+    dataset = Dataset.from_list(data)
+    # Print dataset structure
+    logger.info(f"Dataset features: {dataset.features}")
+    logger.info(f"First example: {dataset[0]}")
+    return dataset
 
 def setup_grpo_trainer(doctor_model, tokenizer, train_dataset=None):
     """
@@ -577,29 +592,54 @@ def setup_grpo_trainer(doctor_model, tokenizer, train_dataset=None):
     # Define reward functions
     def conversation_quality_reward(completions, prompts=None, **kwargs) -> list[float]:
         """Reward function for conversation quality and format."""
-        responses = [completion[0]['content'] for completion in completions]
-        rewards = []
+        logger.info(f"REWARD FUNCTION CALLED - Evaluating {len(completions)} completions")
+        
+        # Print completions structure to understand what we're getting
+        logger.info(f"Completion structure: {type(completions)}")
+        if completions and len(completions) > 0:
+            logger.info(f"First completion structure: {type(completions[0])}")
+            logger.info(f"First completion content: {str(completions[0])[:200]}...")
+        
+        # Extract responses - handle different possible formats
+        responses = []
+        for completion in completions:
+            if isinstance(completion, dict) and 'content' in completion:
+                responses.append(completion['content'])
+            elif isinstance(completion, list) and len(completion) > 0:
+                if isinstance(completion[0], dict) and 'content' in completion[0]:
+                    responses.append(completion[0]['content'])
+                else:
+                    responses.append(str(completion[0]))
+            else:
+                responses.append(str(completion))
         
         # Print prompts for debugging if available
         if prompts:
+            logger.info(f"Prompts structure: {type(prompts)}")
             for i, prompt in enumerate(prompts):
-                user_query = prompt[-1]['content'] if isinstance(prompt, list) and prompt else "No prompt"
-                logger.info(f"\n{'='*40}\nPrompt {i}: {user_query[:100]}...\n{'='*40}")
+                prompt_text = str(prompt)
+                if isinstance(prompt, list) and prompt and len(prompt) > 0:
+                    if isinstance(prompt[-1], dict) and 'content' in prompt[-1]:
+                        prompt_text = prompt[-1]['content']
+                logger.info(f"\n{'='*40}\nPrompt {i}: {prompt_text[:100]}...\n{'='*40}")
         
+        rewards = []
         for i, response in enumerate(responses):
             reward = 0.0
+            response_str = str(response)
+            
             # Check for <reason> tags
-            has_reason_tags = "<reason>" in response and "</reason>" in response
+            has_reason_tags = "<reason>" in response_str and "</reason>" in response_str
             if has_reason_tags:
                 reward += 0.5
                 
             # Check for coherent response
-            is_coherent = len(response) > 50
+            is_coherent = len(response_str) > 50
             if is_coherent:
                 reward += 0.3
                 
             # Check for diagnostic language
-            has_medical_terms = any(term in response.lower() for term in 
+            has_medical_terms = any(term in response_str.lower() for term in 
                                    ["diagnosis", "condition", "symptom", "treatment"])
             if has_medical_terms:
                 reward += 0.2
@@ -608,22 +648,32 @@ def setup_grpo_trainer(doctor_model, tokenizer, train_dataset=None):
             reason_text = ""
             if has_reason_tags:
                 try:
-                    reason_text = re.search(r"<reason>(.*?)</reason>", response, re.DOTALL).group(1).strip()
+                    reason_text = re.search(r"<reason>(.*?)</reason>", response_str, re.DOTALL).group(1).strip()
                 except:
                     reason_text = "Couldn't extract reason"
             
             # Print conversation for debugging
-            logger.info(f"\n{'*'*80}\nResponse {i}:\n{response[:200]}...\n\nReason: {reason_text[:150]}...\n\nReward: {reward:.2f} (reason: {0.5 if has_reason_tags else 0}, coherent: {0.3 if is_coherent else 0}, medical: {0.2 if has_medical_terms else 0})\n{'*'*80}")
+            logger.info(f"\n{'*'*80}\nResponse {i}:\n{response_str[:200]}...\n\nReason: {reason_text[:100] if reason_text else 'None'}...\n\nReward: {reward:.2f} (reason: {0.5 if has_reason_tags else 0}, coherent: {0.3 if is_coherent else 0}, medical: {0.2 if has_medical_terms else 0})\n{'*'*80}")
             
             rewards.append(reward)
-            
+        
+        logger.info(f"Rewards: {rewards}")
         return rewards
     
     # If no dataset provided, create one
     if train_dataset is None:
         train_dataset = create_medical_dataset(num_samples=50)
     
-    # Configure GRPO
+    # Configure GRPO based on whether we're in debug mode
+    effective_max_steps = DEBUG_MAX_STEPS if DEBUG_MODE else MAX_STEPS
+    effective_save_steps = min(5, effective_max_steps // 2) if DEBUG_MODE else SAVE_STEPS
+    
+    logger.info(f"Training with {'DEBUG' if DEBUG_MODE else 'NORMAL'} settings:")
+    logger.info(f"- Max steps: {effective_max_steps}")
+    logger.info(f"- Save steps: {effective_save_steps}")
+    logger.info(f"- Dataset size: {len(train_dataset)}")
+    logger.info(f"- Number of generations: {NUM_GENERATIONS}")
+    
     training_args = GRPOConfig(
         use_vllm=True,
         learning_rate=LEARNING_RATE,
@@ -633,16 +683,16 @@ def setup_grpo_trainer(doctor_model, tokenizer, train_dataset=None):
         warmup_ratio=0.1,
         lr_scheduler_type="cosine",
         optim="paged_adamw_8bit",
-        logging_steps=1,
+        logging_steps=1,  # Log every step
         bf16=is_bfloat16_supported(),
         fp16=not is_bfloat16_supported(),
-        per_device_train_batch_size=4,  # Ensure divisible by num_generations
-        gradient_accumulation_steps=4,
+        per_device_train_batch_size=2,  # Smaller batch size for debugging
+        gradient_accumulation_steps=2,  # Smaller accumulation for debugging
         num_generations=NUM_GENERATIONS,
         max_prompt_length=1024,
         max_completion_length=1024,
-        max_steps=MAX_STEPS,
-        save_steps=SAVE_STEPS,
+        max_steps=effective_max_steps,
+        save_steps=effective_save_steps,
         max_grad_norm=0.1,
         report_to="none",
         output_dir="outputs",
@@ -663,13 +713,15 @@ async def main(openai_api_key):
     """Main training loop"""
     # Configure more verbose logging
     logger.setLevel(logging.INFO)
-    # Add a stream handler to ensure logs are printed to terminal
-    if not logger.handlers:
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
+    # Remove any existing handlers to prevent duplicate logs
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    # Add a single stream handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
     
     logger.info("="*50)
     logger.info("STARTING MEDICAL GRPO TRAINING")
@@ -678,9 +730,9 @@ async def main(openai_api_key):
     # Load model
     doctor_model, tokenizer = load_doctor_model()
     
-    # Create a smaller dataset for easier debugging
+    # Create a very small dataset for easier debugging
     from datasets import Dataset
-    debug_dataset = create_medical_dataset(num_samples=10)
+    debug_dataset = create_medical_dataset(num_samples=5 if DEBUG_MODE else 10)
     
     # Print some examples from the dataset
     logger.info(f"Created dataset with {len(debug_dataset)} examples. Sample prompts:")
@@ -696,20 +748,35 @@ async def main(openai_api_key):
     logger.info("Setting up GRPO trainer with static dataset")
     trainer = setup_grpo_trainer(doctor_model, tokenizer, train_dataset=debug_dataset)
     
-    # Add a callback to print each step's progress
-    class LoggingCallback:
+    # Add a proper callback that implements all required methods
+    from transformers.trainer_callback import TrainerCallback
+    
+    class LoggingCallback(TrainerCallback):
+        def on_train_begin(self, args, state, control, **kwargs):
+            logger.info("Training begins!")
+            return control
+            
+        def on_step_begin(self, args, state, control, **kwargs):
+            return control
+            
         def on_step_end(self, args, state, control, **kwargs):
             if state.global_step % 1 == 0:
-                logger.info(f"Step {state.global_step}: loss={state.train_loss:.6f}, reward={kwargs.get('reward', 'N/A')}")
-                logger.info(f"Learning stats: {kwargs}")
+                # Format the log message
+                log_msg = f"Step {state.global_step}"
+                if hasattr(state, 'train_loss'):
+                    log_msg += f", loss={state.train_loss:.6f}"
+                if 'reward' in kwargs:
+                    log_msg += f", reward={kwargs['reward']}"
+                logger.info(log_msg)
+            return control
+            
+        def on_train_end(self, args, state, control, **kwargs):
+            logger.info(f"Training ended with {state.global_step} steps completed")
+            return control
     
     # Train the model using trl's GRPOTrainer
     logger.info("Starting GRPO training using trainer.train()")
-    # Try to inject our callback if possible
-    try:
-        trainer.add_callback(LoggingCallback())
-    except:
-        logger.warning("Could not add logging callback. Will continue without detailed step logs.")
+    trainer.add_callback(LoggingCallback())
     
     trainer.train()
     
