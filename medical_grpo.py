@@ -174,7 +174,7 @@ Conversation so far:
         4) If the Doctor says "Final diagnosis: ...", we set done=True.
         """
         prompt = self.build_doctor_prompt()
-        outs = doctor_model.fast_generate([prompt], max_new_tokens=256, sampling_params=sampling_params)
+        outs = doctor_model.fast_generate([prompt], sampling_params=sampling_params)
         full_doctor_text = outs[0]  # includes <reason> plus visible text
 
         doc_visible = remove_reason_tags(full_doctor_text)
