@@ -84,7 +84,8 @@ def load_doctor_model(model_name: str = "unsloth/Phi-4",
         max_seq_length=2048,
         load_in_4bit=True,      # 4-bit quant for efficiency
         fast_inference=True,
-        gpu_memory_utilization=0.9,
+        gpu_memory_utilization=0.7,  # Reduced from 0.9 to avoid OOM errors
+        enforce_eager=True,     # Use eager mode instead of cudagraphs to avoid OOM during capture
     )
     logger.info("Applying LoRA...")
     model = FastLanguageModel.get_peft_model(
