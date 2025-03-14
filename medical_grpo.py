@@ -35,14 +35,14 @@ PATIENT_SYSTEM_PROMPT = """System:
 You are a patient simulator for medical training.
 1. You have chosen a disease to simulate (hidden).
 2. Provide consistent symptoms for that disease.
-3. Do not reveal it unless asked.
+3. Do not reveal it unless asked specifically for the hidden disease.
 Begin roleplaying as a patient now.
 """
 
 DOCTOR_SYSTEM_PROMPT = """System:
-You are an AI Doctor. Each turn, you MUST include a hidden chain-of-thought 
-within <reason>...</reason> tags, then a short question or final statement.
-NEVER reveal <reason> to the patient. 
+You are a doctor looking to diagnose a patient. Each turn, you MUST include a hidden chain-of-thought 
+within <reason>...</reason> tags, then a short question that helps to diagnose or a final statement stating the diagnosis.
+NEVER reveal <reason> to the patient. When you know the diagnosis, say "Final diagnosis: *disease/condition*". 
 """
 
 ###############################################################################
@@ -142,8 +142,8 @@ async def get_turn_reward(
     """
     # Build a short system prompt that instructs the critic to rate only the last doc turn
     turn_critic_prompt = f"""System:
-You are a turn-by-turn conversation critic. 
-Look at the entire conversation so far (no hidden reasons), 
+You are a turn-by-turn conversation critic, rating the conversation of a doctor. 
+Look at the entire conversation so far,
 then the new Doctor turn. 
 Rate how relevant & coherent the new Doctor turn is in [0..0.5]. 
 Just provide a float as the first number.
@@ -181,7 +181,7 @@ async def get_final_correctness_reward(
     that yields a float [0..0.5].
     """
     final_critic_prompt = f"""System:
-You are a final diagnosis critic. 
+You are rating the diagnosis of a doctor.
 See the entire conversation (with <reason> blocks). 
 The actual disease was: {revealed_disease}.
 If the Doctor's final diagnosis matches it, give up to 0.5. 
@@ -268,100 +268,119 @@ async def run_selfplay_episode(
     openai_api_key: str,
     max_turns: int,
     episode_id: int,
+    logging_dir: str = "logs"
 ) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
     """
     Runs a multi-turn scenario. 
-    For each Doctor turn, we do:
-      - partial reward for coherence
-      - if final diagnosis is present, we do final correctness reward
-      - sum them, do .grpo_step with (prompt, doc_turn)
+    - Logs conversation to a text file if desired.
+    - For each Doctor turn: 
+        1) partial coherence reward, 
+        2) optional final correctness reward,
+        3) .grpo_step() with the new doc turn
     Returns:
-      conversation_no_reason,
-      conversation_with_reason
+      (conversation_no_reason, conversation_with_reason)
     """
-    logger.info(f"[Episode #{episode_id}] Starting scenario with up to {max_turns} turns.")
-    conversation_nr = []
-    conversation_wr = []
+
+    import os
+    os.makedirs(logging_dir, exist_ok=True)
     
-    # Patient's first response
-    system_kickoff = [{"role": "doctor", "content": "Hello, what's your main complaint?"}]
-    first_patient = await get_patient_reply(system_kickoff, openai_api_key)
-    conversation_nr.append({"role": "patient", "content": first_patient})
-    conversation_wr.append({"role": "patient", "content": first_patient})
+    # We create a filename like: logs/episode_5_2025-03-14_173012.txt
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_filename = os.path.join(logging_dir, f"episode_{episode_id}_{timestamp}.txt")
     
-    for turn_idx in range(1, max_turns+1):
-        # Doctor generates a new turn
-        full_doc, visible_doc = generate_doctor_turn(
-            doctor_model, tokenizer, conversation_nr, turn_idx, max_turns
-        )
-        conversation_wr.append({"role": "doctor", "content": full_doc})
-        conversation_nr.append({"role": "doctor", "content": visible_doc})
+    # Start logging
+    with open(log_filename, "w", encoding="utf-8") as f:
+        f.write(f"=== DOCTOR-PATIENT EPISODE #{episode_id} ===\n")
+        f.write(f"Date/Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("="*60 + "\n\n")
         
-        # 1) partial reward for coherence, etc.
-        partial_reward = await get_turn_reward(conversation_nr[:-1], visible_doc, openai_api_key)
-        # conversation_nr[:-1] is the conversation before this new doc turn
-        # so the critic sees context + the doc's new turn = partial_reward in [0..0.5]
+        conversation_nr = []
+        conversation_wr = []
         
-        # 2) final correctness reward if "Final diagnosis" found
-        final_reward = 0.0
-        if "final diagnosis:" in visible_doc.lower():
-            # We end the scenario after this. 
-            # Let's see if the doc is correct
-            revealed = await reveal_disease(conversation_nr, openai_api_key)
-            final_reward = await get_final_correctness_reward(conversation_wr, revealed, openai_api_key)
-            logger.info(f"Doctor gave final diagnosis. Additional final reward={final_reward:.3f}")
+        # Patient’s first response
+        system_kickoff = [{"role": "doctor", "content": "Hello, what's your main complaint?"}]
+        first_patient = await get_patient_reply(system_kickoff, openai_api_key)
         
-        total_reward = partial_reward + final_reward
+        # Log
+        f.write("[SYSTEM -> PATIENT] 'Hello, what's your main complaint?'\n\n")
+        f.write(f"[PATIENT (GPT-4o-mini)]: {first_patient}\n\n")
         
-        # 3) RL update: we treat "conversation so far" as prompt, new doc turn as completion
-        # We'll flatten the conversation up to but not including the new doc turn as prompt
-        # Actually, TRL expects a "list of roles", so we can do:
-        # prompts = the entire conversation minus this last doc turn
-        # completions = just this doc turn
-        # advantage = total_reward (minus baseline if you want)
+        conversation_nr.append({"role": "patient", "content": first_patient})
+        conversation_wr.append({"role": "patient", "content": first_patient})
         
-        # Build the prompt for .grpo_step
-        # We'll put everything so far in user role. 
-        # In practice, you can do a simpler "User: Summarize the conversation so far..."
-        # but let's do a direct approach:
+        for turn_idx in range(1, max_turns + 1):
+            # Doctor turn
+            full_doc, visible_doc = generate_doctor_turn(
+                doctor_model, tokenizer, conversation_nr,
+                turn_idx, max_turns
+            )
+            conversation_wr.append({"role": "doctor", "content": full_doc})
+            conversation_nr.append({"role": "doctor", "content": visible_doc})
+            
+            # Log the raw doctor turn with <reason>
+            reason_match = re.search(r"<reason>(.*?)</reason>", full_doc, re.DOTALL)
+            hidden_reason = reason_match.group(1) if reason_match else "(none)"
+            
+            f.write(f"--- Turn {turn_idx} ---\n")
+            f.write(f"[DOCTOR REASON]: {hidden_reason}\n\n")
+            f.write(f"[DOCTOR (Phi-4, visible)]: {visible_doc}\n\n")
+            
+            # 1) partial reward
+            partial_reward = await get_turn_reward(
+                conversation_nr[:-1],
+                visible_doc,
+                openai_api_key
+            )
+            
+            # 2) final correctness reward if we detect "final diagnosis"
+            final_reward = 0.0
+            if "final diagnosis:" in visible_doc.lower():
+                revealed = await reveal_disease(conversation_nr, openai_api_key)
+                final_reward = await get_final_correctness_reward(
+                    conversation_wr, revealed, openai_api_key
+                )
+                f.write(f"[PATIENT DISEASE REVEAL]: {revealed}\n\n")
+                f.write(f"(Final correctness reward: {final_reward:.3f})\n\n")
+            
+            total_reward = partial_reward + final_reward
+            
+            # 3) RL update
+            prompt_text_lines = []
+            for t in conversation_nr[:-1]:
+                prompt_text_lines.append(f"{t['role'].upper()}: {t['content']}")
+            prompt_text = "\n".join(prompt_text_lines)
+            doc_completion = visible_doc
+            advantage = total_reward  # or (total_reward - baseline)
+            
+            stats = trainer.grpo_step(
+                prompts=[[{"role": "user", "content": prompt_text}]],
+                completions=[[{"role": "assistant", "content": doc_completion}]],
+                advantage=[advantage],
+            )
+            
+            # Log stats
+            f.write(f"[TURN RL] partial={partial_reward:.3f}, final={final_reward:.3f}, "
+                    f"total={total_reward:.3f},\n"
+                    f"loss={stats['loss']:.4f}, kl={stats['kl']:.4f}, "
+                    f"reward={stats['reward']:.4f}, grad_norm={stats['grad_norm']:.4f}\n\n")
+            
+            if final_reward > 0 or "final diagnosis:" in visible_doc.lower():
+                f.write(f"--- Episode ended at turn {turn_idx} ---\n\n")
+                break
+            
+            if turn_idx < max_turns:
+                # Patient turn
+                pat_resp = await get_patient_reply(conversation_nr, openai_api_key)
+                conversation_nr.append({"role": "patient", "content": pat_resp})
+                conversation_wr.append({"role": "patient", "content": pat_resp})
+                
+                f.write(f"[PATIENT (GPT-4o-mini)]: {pat_resp}\n\n")
         
-        prompt_text_lines = []
-        for t in conversation_nr[:-1]:
-            prompt_text_lines.append(f"{t['role'].upper()}: {t['content']}")
-        prompt_text = "\n".join(prompt_text_lines)
-        
-        # The new Doctor turn is the "completion"
-        doc_completion = visible_doc
-        
-        # Optionally do baseline advantage = reward - baseline. 
-        # For simplicity, we skip baseline => advantage = total_reward
-        advantage = total_reward
-        
-        # Single batch => pass as a list of lists
-        prompts = [[{"role": "user", "content": prompt_text}]]
-        completions = [[{"role": "assistant", "content": doc_completion}]]
-        
-        stats = trainer.grpo_step(
-            prompts=prompts,
-            completions=completions,
-            advantage=[advantage],
-        )
-        
-        logger.info(f"[turn {turn_idx}] partial={partial_reward:.3f}, final={final_reward:.3f}, total={total_reward:.3f}, "
-                    f"loss={stats['loss']:.4f}, kl={stats['kl']:.4f}, reward={stats['reward']:.4f}, "
-                    f"grad_norm={stats['grad_norm']:.4f}")
-        
-        if final_reward > 0 or "final diagnosis:" in visible_doc.lower():
-            logger.info(f"Episode #{episode_id} ended on turn {turn_idx}.")
-            break
-        
-        # 4) If not final, get patient reply
-        if turn_idx < max_turns:
-            pat_resp = await get_patient_reply(conversation_nr, openai_api_key)
-            conversation_nr.append({"role": "patient", "content": pat_resp})
-            conversation_wr.append({"role": "patient", "content": pat_resp})
-    
+        f.write("=== END OF EPISODE ===\n")
+
     return conversation_nr, conversation_wr
+
 
 ###############################################################################
 #                     MAIN TRAINING LOOP
