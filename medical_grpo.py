@@ -32,12 +32,11 @@ from trl import GRPOConfig, GRPOTrainer
 # Fallback import if trl import fails
 # from unsloth import GRPOTrainer
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Configure the logger - we'll set up handlers in main()
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+# Prevent log propagation to avoid duplicate entries
+logger.propagate = False
 
 # Constants
 MAX_TURNS = 5
@@ -497,9 +496,7 @@ async def generate_batch_data(doctor_model, tokenizer, openai_api_key, batch_siz
             for turn in conversation:
                 role = turn['role'].upper()
                 content = turn['content']
-                # Truncate content for display if too long
-                if len(content) > 200:
-                    content = content[:200] + "..."
+                # Display full conversation content
                 logger.info(f"{role}: {content}")
             logger.info(f"REWARD: {reward:.4f}\n{'='*80}")
             
@@ -652,8 +649,8 @@ def setup_grpo_trainer(doctor_model, tokenizer, train_dataset=None):
                 except:
                     reason_text = "Couldn't extract reason"
             
-            # Print conversation for debugging
-            logger.info(f"\n{'*'*80}\nResponse {i}:\n{response_str[:200]}...\n\nReason: {reason_text[:100] if reason_text else 'None'}...\n\nReward: {reward:.2f} (reason: {0.5 if has_reason_tags else 0}, coherent: {0.3 if is_coherent else 0}, medical: {0.2 if has_medical_terms else 0})\n{'*'*80}")
+            # Print conversation for debugging - show full content
+            logger.info(f"\n{'*'*80}\nResponse {i}:\n{response_str}\n\nReason: {reason_text if reason_text else 'None'}\n\nReward: {reward:.2f} (reason: {0.5 if has_reason_tags else 0}, coherent: {0.3 if is_coherent else 0}, medical: {0.2 if has_medical_terms else 0})\n{'*'*80}")
             
             rewards.append(reward)
         
@@ -711,17 +708,15 @@ def setup_grpo_trainer(doctor_model, tokenizer, train_dataset=None):
 
 async def main(openai_api_key):
     """Main training loop"""
-    # Configure more verbose logging
-    logger.setLevel(logging.INFO)
-    # Remove any existing handlers to prevent duplicate logs
-    for handler in logger.handlers[:]:
-        logger.removeHandler(handler)
-    # Add a single stream handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    # Set up handlers only if they don't exist yet
+    if not logger.handlers:
+        # Add a single stream handler
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+        logger.info("Logger configured.")
     
     logger.info("="*50)
     logger.info("STARTING MEDICAL GRPO TRAINING")
@@ -741,7 +736,7 @@ async def main(openai_api_key):
         system = prompt[0]['content'] if len(prompt) > 0 else "No system prompt"
         user = prompt[1]['content'] if len(prompt) > 1 else "No user prompt"
         logger.info(f"Example {i}:")
-        logger.info(f"  System: {system[:100]}...")
+        logger.info(f"  System: {system}")
         logger.info(f"  User: {user}")
     
     # Setup GRPO trainer with static dataset
