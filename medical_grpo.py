@@ -27,8 +27,10 @@ from dataclasses import dataclass
 
 # Unsloth imports
 from unsloth import FastLanguageModel, is_bfloat16_supported
-# TRL imports for GRPO
-from trl import GRPOTrainer, GRPOConfig
+# Import GRPOTrainer from unsloth for compatibility with unsloth's implementation
+from unsloth import GRPOTrainer
+# Import GRPOConfig from trl
+from trl import GRPOConfig
 
 # Configure logging
 logging.basicConfig(
@@ -507,6 +509,27 @@ def setup_grpo_trainer(doctor_model, tokenizer):
     Returns:
         GRPO trainer instance
     """
+    # Define reward functions
+    def conversation_quality_reward(completions, **kwargs) -> list[float]:
+        """Reward function for conversation quality and format."""
+        responses = [completion[0]['content'] for completion in completions]
+        rewards = []
+        
+        for response in responses:
+            reward = 0.0
+            # Check for <reason> tags
+            if "<reason>" in response and "</reason>" in response:
+                reward += 0.5
+            # Check for coherent response
+            if len(response) > 50:
+                reward += 0.3
+            # Check for diagnostic language
+            if any(term in response.lower() for term in ["diagnosis", "condition", "symptom", "treatment"]):
+                reward += 0.2
+            rewards.append(reward)
+            
+        return rewards
+    
     # Configure GRPO
     # Note: Make sure all parameters are supported by your version of GRPOConfig
     training_args = GRPOConfig(
@@ -536,6 +559,7 @@ def setup_grpo_trainer(doctor_model, tokenizer):
     trainer = GRPOTrainer(
         model=doctor_model,
         processing_class=tokenizer,
+        reward_funcs=[conversation_quality_reward],  # Add required reward functions
         args=training_args,
     )
     
