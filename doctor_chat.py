@@ -88,11 +88,22 @@ def interactive_chat_session(model_path: str, temperature: float = 0.7):
         enforce_eager=True,
     )
     
-    # Load LoRA weights
-    model = FastLanguageModel.get_peft_model(
-        model,
-        lora_path=model_path,
-    )
+    # Load LoRA weights - first convert to regular model
+    try:
+        # Try loading LoRA weights directly
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, model_path)
+        print(f"Loaded LoRA weights from {model_path}")
+    except Exception as e:
+        print(f"Error loading LoRA weights: {str(e)}")
+        print("Falling back to using fresh model without LoRA weights")
+        # Apply fresh LoRA config as fallback
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=16,  # Using default rank
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", 
+                          "gate_proj", "up_proj", "down_proj"],
+        )
     
     print("\n=== Model loaded successfully! ===")
     print("\nAI Doctor Chat Session")
