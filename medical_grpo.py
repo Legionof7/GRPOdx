@@ -404,11 +404,11 @@ async def main(openai_api_key: str):
         logging_steps=1,
         bf16=is_bfloat16_supported(),
         fp16=not is_bfloat16_supported(),
-        per_device_train_batch_size=1,
+        per_device_train_batch_size=2,  # Must be a multiple of num_generations
         gradient_accumulation_steps=1,
         max_steps=999999,  
         max_grad_norm=0.3,
-        num_generations=1, 
+        num_generations=2,  # Must divide evenly into batch size
         max_prompt_length=2048,
         max_completion_length=1024,
         save_steps=1,
