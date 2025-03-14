@@ -253,6 +253,7 @@ def generate_doctor_turn(
         temperature=temperature,
         top_p=0.9,
         max_tokens=300,
+        stop=["<|end_of_document|>", "<|endoftext|>"]
     )
     
     outputs = doctor_model.fast_generate(
@@ -471,11 +472,20 @@ async def main(openai_api_key: str):
         
         # Now we train on this batch_data
         logger.info(f"Training on batch of size {len(batch_data)} from step {step+1}")
-        for text, advantage in batch_data:
-            trainer.grpo_step(
-                prompt=[{"role": "user", "content": text}],
-                advantage=[advantage]
-            )
+        
+        # Group data by batches of 2 to match num_generations=2
+        for i in range(0, len(batch_data), 2):
+            batch_slice = batch_data[i:i+2]
+            if len(batch_slice) == 2:  # Ensure we have a full batch
+                prompts = []
+                advantages = []
+                
+                for text, advantage in batch_slice:
+                    prompts.append([{"role": "user", "content": text}])
+                    advantages.append(advantage)
+                
+                # Process a batch at once
+                trainer.grpo_step(prompts=prompts, advantages=advantages)
         
         # Save checkpoint every second step
         if step % 2 == 1:
