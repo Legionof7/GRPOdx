@@ -27,22 +27,7 @@ from accelerate.utils import broadcast_object_list, gather, gather_object, set_s
 from trl import maybe_apply_chat_template
 from trl.trainer.grpo_trainer import pad
 
-# Import directly from Tic Tac Toe Game.py
-import sys
-import importlib.util
-import os
-
-# Helper function to load the UnslothGRPOTrainer from Tic Tac Toe Game.py
-def load_class_from_file(file_path, class_name):
-    """Load a class from a file path"""
-    spec = importlib.util.spec_from_file_location("module", file_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return getattr(module, class_name)
-
-# Find the Tic Tac Toe Game.py file
-tic_tac_toe_path = os.path.join(os.path.dirname(__file__), "Tic Tac Toe Game.py")
-UnslothGRPOTrainer = load_class_from_file(tic_tac_toe_path, "UnslothGRPOTrainer")
+from unsloth_compiled_cache.UnslothGRPOTrainer import UnslothGRPOTrainer
 
 # NEW: Import OpenAI
 from openai import OpenAI
