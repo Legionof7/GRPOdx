@@ -27,8 +27,8 @@ from accelerate.utils import broadcast_object_list, gather, gather_object, set_s
 from trl import maybe_apply_chat_template
 from trl.trainer.grpo_trainer import pad
 
-# Import the same patched Unsloth trainer from your Tic-Tac-Toe example
-from unsloth_compiled_cache.UnslothGRPOTrainer import UnslothGRPOTrainer
+# Import the UnslothGRPOTrainer implementation
+from unsloth_compiled_cache import UnslothGRPOTrainer
 
 # NEW: Import OpenAI
 from openai import OpenAI
