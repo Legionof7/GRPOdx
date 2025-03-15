@@ -235,6 +235,9 @@ class DoctorGame:
         """
         Calls GPT-4o-mini as Patient via the OpenAI API.
         The patient sees only the visible conversation plus a system message.
+        
+        This function is kept as a compatibility method, but the main conversation loop
+        now handles patient interaction directly.
         """
         if self.done:
             return
@@ -243,28 +246,80 @@ class DoctorGame:
         self.conv_with_reason.append({"role": "patient", "content": pat_text})
         self.conv_no_reason.append({"role": "patient", "content": pat_text})
         logger.debug(f"Conversation {self.conversation_id}, Turn {self.turn_count}, Patient: {pat_text}")
+        return pat_text
 
     def run_episode(self, doctor_model, doctor_system_prompt: str):
         """
         Runs the multi-turn conversation:
           - Up to MAX_TURNS or until the Doctor gives a final diagnosis.
           - After completion, calls the Judge for a final numeric score.
+          - Saves the complete conversation to a text file.
         """
         self.turn_count = 0
+        self.done = False
+        self.conv_with_reason = []
+        self.conv_no_reason = []
+        
+        logger.info(f"Beginning conversation episode {self.conversation_id} with hidden disease: {self.hidden_disease}")
+        print(f"Starting conversation with hidden disease: {self.hidden_disease}")
+        
+        # Keep track of conversation turns in a format we can log directly
+        conversation_log = [f"HIDDEN DISEASE: {self.hidden_disease}\n"]
+        conversation_log.append(f"SYSTEM PROMPT (Patient): {self.patient_system}\n")
+        conversation_log.append(f"SYSTEM PROMPT (Doctor): {doctor_system_prompt}\n")
+        
         while not self.done and self.turn_count < MAX_TURNS:
             self.turn_count += 1
             logger.info(f"Conversation {self.conversation_id}: Starting turn {self.turn_count}/{MAX_TURNS}")
+            print(f"Turn {self.turn_count}/{MAX_TURNS}")
+            
+            # Build doctor prompt and generate response
             doc_input = self._build_doctor_prompt(doctor_system_prompt)
             doc_outs = doctor_model.fast_generate([doc_input], max_new_tokens=256, temperature=0.7)
             doc_text = doc_outs[0]
-            self.step_doctor(doc_text)
+            
+            # Add to conversation history
+            self.conv_with_reason.append({"role": "doctor", "content": doc_text})
+            visible_doc_text = self.remove_reason_tags(doc_text)
+            self.conv_no_reason.append({"role": "doctor", "content": visible_doc_text})
+            
+            # Check if doctor provided final diagnosis
+            if "Final diagnosis:" in visible_doc_text:
+                self.done = True
+                final_diagnosis = self.parse_final_diagnosis(visible_doc_text)
+                logger.info(f"Conversation {self.conversation_id}: Doctor gave final diagnosis: {final_diagnosis}")
+                print(f"Final diagnosis: {final_diagnosis}")
+            
+            # Log doctor's response
+            conversation_log.append(f"TURN {self.turn_count} - DOCTOR:\n{doc_text}\n")
+            
+            # If not done, get patient response
             if not self.done:
-                self.step_patient()
+                # Get patient response
+                messages = [{"role": "system", "content": self.patient_system}] + self.conv_no_reason
+                pat_text = call_patient_model(messages, max_new_tokens=128, temperature=0.7)
+                
+                # Add to conversation history
+                self.conv_with_reason.append({"role": "patient", "content": pat_text})
+                self.conv_no_reason.append({"role": "patient", "content": pat_text})
+                
+                # Log patient's response
+                conversation_log.append(f"TURN {self.turn_count} - PATIENT:\n{pat_text}\n")
+                print(f"Patient responded with {len(pat_text)} characters")
         
-        reward = self.final_judge_reward()
+        # Get final reward from judge
+        conv_str = ""
+        for turn in self.conv_with_reason:
+            conv_str += f"{turn['role'].title()}: {turn['content']}\n"
         
-        # Log the complete conversation to a separate file
-        self._log_conversation_to_file(reward)
+        reward = call_judge_model(conv_str, self.hidden_disease)
+        logger.info(f"Conversation {self.conversation_id}: Judge gave reward score: {reward:.4f}")
+        print(f"Judge gave reward: {reward:.4f}")
+        
+        conversation_log.append(f"FINAL REWARD: {reward:.4f}\n")
+        
+        # Save the conversation immediately to a file
+        self._save_conversation(conversation_log, reward)
         
         return reward
 
@@ -290,23 +345,34 @@ class DoctorGame:
         logger.info(f"Conversation {self.conversation_id}: Judge gave reward score: {reward:.4f}")
         return reward
         
-    def _log_conversation_to_file(self, reward: float):
+    def _save_conversation(self, conversation_log, reward: float):
         """
-        Logs the complete conversation to a separate file for review.
+        Saves the complete conversation to a text file.
         """
-        os.makedirs("logs/conversations", exist_ok=True)
-        filename = f"logs/conversations/{self.conversation_id}_reward_{reward:.4f}.txt"
-        
-        with open(filename, "w") as f:
-            f.write(f"Hidden disease: {self.hidden_disease}\n")
-            f.write(f"Total turns: {self.turn_count}\n")
-            f.write(f"Final reward: {reward:.4f}\n\n")
-            f.write("=== FULL CONVERSATION (with reasoning) ===\n\n")
+        # Create all directories in path if they don't exist
+        try:
+            conversation_dir = os.path.join(os.getcwd(), "conversations")
+            os.makedirs(conversation_dir, exist_ok=True)
             
-            for turn in self.conv_with_reason:
-                f.write(f"{turn['role'].upper()}:\n{turn['content']}\n\n")
+            # Create a filename with timestamp, ID and reward score
+            filename = os.path.join(conversation_dir, f"{self.conversation_id}_reward_{reward:.4f}.txt")
+            
+            # Write all conversation entries to the file
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(f"CONVERSATION ID: {self.conversation_id}\n")
+                f.write(f"TIMESTAMP: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"TOTAL TURNS: {self.turn_count}\n\n")
                 
-        logger.info(f"Saved complete conversation to {filename}")
+                # Write each conversation entry
+                for entry in conversation_log:
+                    f.write(f"{entry}\n")
+            
+            logger.info(f"Successfully saved conversation to {filename}")
+            print(f"Saved conversation to {filename}")  # Also print to console for visibility
+            
+        except Exception as e:
+            logger.error(f"Error saving conversation to file: {str(e)}")
+            print(f"Error saving conversation: {str(e)}")  # Print error to console
 
 ########################################
 # 4. Custom Trainer with multi_turn_generation
@@ -330,12 +396,21 @@ class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
     """
     Overrides multi_turn_generation to run a DoctorGame with GPT-4o roles
     via the OpenAI API for the Patient and Judge.
+    
+    Each conversation is automatically saved to a text file in the 'conversations' directory.
     """
 
     def multi_turn_generation(self, prompt, model, tokenizer, generation_config, max_new_tokens=50, game_object=None):
         logger.info("===== Starting a new Doctor–Patient Episode with GPT-4o API roles =====")
+        print("===== Starting new Doctor–Patient conversation (will save to 'conversations' folder) =====")
+        
+        # Create conversations directory if it doesn't exist
+        os.makedirs("conversations", exist_ok=True)
+        
+        # Run the episode - this will automatically save the conversation to a file
         scenario = DoctorGame()
         final_score = scenario.run_episode(model, DOCTOR_SYSTEM_PROMPT)
+        
         # Return dummy token IDs since multi-turn generation isn't tokenized fully here.
         completion_ids = [0, 1, 2]
         return completion_ids, final_score
