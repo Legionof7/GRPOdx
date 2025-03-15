@@ -429,9 +429,8 @@ config = GRPOConfig(
     max_completion_length=512,
     num_generations=5,  # generate 5 completions per scenario => better advantage
     output_dir=f"{save_path}/outputs",
-    openai_api_key="YOUR_OPENAI_API_KEY_HERE"  # <-- This flag should be passed via the command.
 )
-
+config.openai_api_key = "YOUR_OPENAI_API_KEY_HERE"  # <-- This flag should be passed via the command.
 df = pd.DataFrame(create_doctor_database())
 train_dataset = Dataset.from_pandas(df)
 
