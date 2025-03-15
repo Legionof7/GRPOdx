@@ -97,8 +97,8 @@ COMMON_DISEASES = [
 ]
 
 SYSTEM_PROMPT = """
-You are a Doctor diagnosing a patient. Use <reason>Thinking</reason> tags to think about what condition/disease the patient may have and questions to ask.
-Then, ask the patient a question to get more information and to rule things out. You can ask up to 4 questions.
+You are a Doctor diagnosing a patient. 
+Ask the patient questions, one at a time, to get more information and to rule things out. You can ask up to 4 questions.
 
 When you know what the condition is, provide a final line like:
 Final diagnosis: XYZ
@@ -122,11 +122,11 @@ class DoctorGame:
             try:
                 # Initialize client with the provided API key
                 local_client = OpenAI(api_key=openai_api_key)
-                prompt = ("Generate a plausible medical condition (for example: Influenza, COVID-19, Migraine, etc.) "
+                prompt = ("Generate a medical condition (for example: Influenza, COVID-19, Migraine, etc.) "
                           "and provide only the name of the condition.")
                 response = local_client.chat.completions.create(model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.9,
+                temperature=0.7,
                 max_tokens=10)
                 self.hidden_disease = response.choices[0].message.content.strip()
             except Exception as e:
