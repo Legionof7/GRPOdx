@@ -375,6 +375,7 @@ def doctor_game_reward(prompts, completions, **kwargs) -> list[float]:
     return [0.0] * len(prompts)
 
 def create_doctor_database():
+    global SYSTEM_PROMPT
     row = {
         "prompt": [
             {"role": "system", "content": SYSTEM_PROMPT},
