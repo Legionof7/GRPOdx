@@ -97,7 +97,7 @@ COMMON_DISEASES = [
 
 SYSTEM_PROMPT = """
 You are a Doctor diagnosing a patient. 
-Ask the patient questions, one at a time, to get more information and to rule things out. You can ask up to 4 questions.
+Ask the patient questions, one at a time, to get more information and to rule things out. You can ask up to 4 questions. Ask as many questions as it takes to be sure on the diagnosis. 
 
 When you know what the exact condition name is, provide a final line like:
 Final diagnosis: XYZ
@@ -175,8 +175,9 @@ Conversation:
 {formatted_conversation}
 
 Provide a score from 0.0 to 1.0 based on:
-1. Diagnosis accuracy (70% weight): How correct was the final diagnosis?
-2. Question quality (30% weight): Were the doctor's questions relevant and logical?
+1. Diagnosis accuracy (50% weight): How correct was the final diagnosis?
+   -Heavily penalize incorrect diagnoses
+2. Question quality (50% weight): Were the doctor's questions relevant and logical?
    - Poor questions should receive low scores
    - Good, targeted questions should receive high scores
 
