@@ -99,7 +99,7 @@ SYSTEM_PROMPT = """
 You are a Doctor diagnosing a patient. 
 Ask the patient questions, one at a time, to get more information and to rule things out. You can ask up to 4 questions.
 
-When you know what the condition is, provide a final line like:
+When you know what the exact condition name is, provide a final line like:
 Final diagnosis: XYZ
 """
 
@@ -512,7 +512,7 @@ config = GRPOConfig(
     learning_rate=5e-6,
     temperature=0.9,
     logging_steps=1,
-    max_steps=20,       # just a small demo
+    max_steps=5000,       # just a small demo
     save_steps=10,
     max_prompt_length=max_seq_length-512,
     max_completion_length=512,
