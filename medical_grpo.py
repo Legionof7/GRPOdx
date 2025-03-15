@@ -260,6 +260,9 @@ class DoctorGame:
             # Create a dummy response in case all generation methods fail
             dummy_response = "<reason>I'm having trouble formulating my thoughts, but I'll try to help diagnose your condition.</reason>\nCan you tell me more about your symptoms? When did they start?"
             
+            # Initialize doc_text with fallback value in case all methods fail
+            doc_text = dummy_response
+            
             # Try different generation methods in sequence
             try:
                 # Method 1: Use Unsloth model's method if available
@@ -271,14 +274,27 @@ class DoctorGame:
                     # Most direct method for newer Unsloth models
                     print("Using generate_texts method")
                     doc_text = doctor_model.generate_texts([doc_input])[0]
+                    print("✅ Unsloth generate_texts successful!")
                 
                 elif hasattr(doctor_model, 'generate_text'):
                     # Direct text generation for some Unsloth models
                     print("Using generate_text method")
                     doc_text = doctor_model.generate_text(doc_input, max_new_tokens=256, temperature=0.7)
-                
-                # If successful, print and move on
-                print("✅ Unsloth generation successful!")
+                    print("✅ Unsloth generate_text successful!")
+                    
+                elif hasattr(doctor_model, 'fast_generate'):
+                    # Some Unsloth models use this method
+                    print("Using fast_generate method")
+                    outputs = doctor_model.fast_generate([doc_input], temperature=0.7, max_new_tokens=256)
+                    # Determine the output format
+                    if isinstance(outputs, list) and outputs and isinstance(outputs[0], str):
+                        doc_text = outputs[0]
+                    else:
+                        # Try to extract text from more complex output
+                        doc_text = str(outputs[0])
+                    print("✅ Unsloth fast_generate successful!")
+                else:
+                    print("No recognized Unsloth methods found, trying other approaches...")
                 
             except Exception as e1:
                 print(f"Unsloth method failed: {str(e1)}")
@@ -287,64 +303,105 @@ class DoctorGame:
                     # Method 2: Try standard Hugging Face generation
                     print("Method 2: Trying standard Hugging Face generation...")
                     
+                    # Create a simple response if this fails
+                    method2_text = dummy_response
+                    
                     # Determine which tokenizer to use
                     if hasattr(doctor_model, 'tokenizer'):
                         tokenizer = doctor_model.tokenizer
+                        print("Using model's tokenizer")
                     else:
                         tokenizer = doctor_model.processing_class or doctor_tokenizer
+                        print(f"Using processing_class or provided tokenizer")
                     
-                    # Tokenize input
-                    input_ids = tokenizer(doc_input, return_tensors="pt").input_ids
+                    if tokenizer:
+                        # Tokenize input
+                        try:
+                            input_ids = tokenizer(doc_input, return_tensors="pt").input_ids
+                            
+                            # Try to move to same device as model if possible
+                            if hasattr(doctor_model, 'device'):
+                                input_ids = input_ids.to(doctor_model.device)
+                            
+                            # Standard HF generation
+                            model_to_use = doctor_model.model if hasattr(doctor_model, 'model') else doctor_model
+                            with torch.no_grad():
+                                output = model_to_use.generate(
+                                    input_ids,
+                                    max_new_tokens=256,
+                                    temperature=0.7,
+                                    do_sample=True
+                                )
+                            
+                            # Decode the output
+                            full_output = tokenizer.decode(output[0], skip_special_tokens=True)
+                            # Get just the new part (after input)
+                            method2_text = full_output[len(doc_input):].strip()
+                            print("✅ HF generation successful!")
+                        except Exception as e:
+                            print(f"HF tokenize/generate failed: {str(e)}")
+                    else:
+                        print("No tokenizer available for HF generation")
                     
-                    # Standard HF generation
-                    model_to_use = doctor_model.model if hasattr(doctor_model, 'model') else doctor_model
-                    with torch.no_grad():
-                        output = model_to_use.generate(
-                            input_ids,
-                            max_new_tokens=256,
-                            temperature=0.7,
-                            do_sample=True
-                        )
-                    
-                    # Decode the output
-                    full_output = tokenizer.decode(output[0], skip_special_tokens=True)
-                    # Get just the new part (after input)
-                    doc_text = full_output[len(doc_input):].strip()
-                    
-                    print("✅ HF generation successful!")
+                    # Use the result if we got one
+                    if method2_text != dummy_response:
+                        doc_text = method2_text
                     
                 except Exception as e2:
                     print(f"HF generation failed: {str(e2)}")
                     
                     try:
-                        # Method 3: Use a very basic approach for LoRA models
-                        print("Method 3: Trying basic generation...")
+                        # Method 3: Use a very basic approach or OpenAI fallback
+                        print("Method 3: Trying basic generation or OpenAI fallback...")
+                        method3_success = False
                         
-                        # Try to use any available generation method
+                        # Try to use any available generation method on the model
                         if hasattr(doctor_model, "generate") and callable(doctor_model.generate):
-                            print("Using model's generate method")
-                            output = doctor_model.generate(inputs=doc_input)
-                            if isinstance(output, str):
-                                doc_text = output
-                            else:
-                                # Extract from whatever structure we received
-                                doc_text = str(output)
-                        else:
-                            # If all else fails, use OpenAI to generate a doctor response
-                            print("⚠️ Using OpenAI API as fallback for doctor generation")
-                            client = OpenAI(api_key=openai.api_key)
-                            response = client.chat.completions.create(
-                                model="gpt-3.5-turbo",
-                                messages=[
-                                    {"role": "system", "content": "You are an AI Doctor. Always include a medical reasoning in <reason>...</reason> tags, followed by your response to the patient."},
-                                    {"role": "user", "content": doc_input}
-                                ],
-                                temperature=0.7,
-                                max_tokens=256
-                            )
-                            doc_text = response.choices[0].message.content.strip()
+                            try:
+                                print("Using model's generic generate method")
+                                # Try with keyword arguments first
+                                try:
+                                    output = doctor_model.generate(inputs=doc_input)
+                                except:
+                                    # Try with positional argument
+                                    output = doctor_model.generate(doc_input)
+                                
+                                # Extract usable text
+                                if isinstance(output, str):
+                                    doc_text = output
+                                    method3_success = True
+                                elif hasattr(output, 'text'):
+                                    doc_text = output.text
+                                    method3_success = True
+                                else:
+                                    # Try to convert to string
+                                    doc_text = str(output)
+                                    method3_success = True
+                                
+                                print("✅ Basic generation successful!")
+                            except Exception as e:
+                                print(f"Basic generation failed: {str(e)}")
                         
-                        print("✅ Basic generation successful!")
+                        # If all model-based approaches failed, use OpenAI
+                        if not method3_success:
+                            # Always use OpenAI API as a reliable fallback
+                            print("⚠️ Using OpenAI API as fallback for doctor generation")
+                            try:
+                                client = OpenAI(api_key=openai.api_key)
+                                response = client.chat.completions.create(
+                                    model="gpt-3.5-turbo",
+                                    messages=[
+                                        {"role": "system", "content": "You are an AI Doctor. Always include a medical reasoning in <reason>...</reason> tags, followed by your response to the patient."},
+                                        {"role": "user", "content": doc_input}
+                                    ],
+                                    temperature=0.7,
+                                    max_tokens=256
+                                )
+                                doc_text = response.choices[0].message.content.strip()
+                                print("✅ OpenAI API fallback successful!")
+                            except Exception as e:
+                                print(f"OpenAI API fallback failed: {str(e)}")
+                                # Keep the dummy response if everything fails
                         
                     except Exception as e3:
                         print(f"All generation methods failed: {str(e3)}")
