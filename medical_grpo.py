@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Doctor–Patient GRPO (Multi-Turn) with a base reward for any final diagnosis + 5 completions per scenario."""
+"""
+Doctor–Patient GRPO (Multi-Turn) 
+Using GPT-4o-mini via the OpenAI API for both:
+  - The Patient (roleplaying hidden disease),
+  - The Judge (scoring the final conversation in [0..1]).
+"""
 
 ########################################
 # 0. Imports & Setup
@@ -16,8 +21,8 @@ import pandas as pd
 import random
 import re
 import os
-from contextlib import nullcontext
 import datetime
+from contextlib import nullcontext
 
 from transformers import GenerationConfig
 from trl import GRPOConfig
@@ -25,50 +30,55 @@ from accelerate.utils import broadcast_object_list, gather, gather_object, set_s
 from trl import maybe_apply_chat_template
 from trl.trainer.grpo_trainer import pad
 
-# Import the same patched Unsloth trainer from your Tic-Tac-Toe example
-# (We've placed it in unsloth_compiled_cache.UnslothGRPOTrainer)
+# The same Unsloth trainer logic from Tic-Tac-Toe
 from unsloth_compiled_cache.UnslothGRPOTrainer import UnslothGRPOTrainer
+
+# Import OpenAI and pull API key from environment variable
+import openai
+openai.api_key = os.environ["OPENAI_API_KEY"]
 
 print("Imports complete.")
 
 ########################################
-# 1. Load Base Model & LoRA
+# 1. Load Doctor Model + LoRA
 ########################################
 
-save_path = "/content/drive/MyDrive/UnslothGRPO/doctorExample"
+# Paths & config
+save_path = "/content/drive/MyDrive/UnslothGRPO/doctorGPT4oExample"
+os.makedirs(save_path, exist_ok=True)
 
 max_seq_length = 2048
-lora_rank = 32
+lora_rank = 16
 
-model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+doctor_model_name = "Qwen/Qwen2.5-1.5B-Instruct"  # example base policy
 
-print("Loading base model ...")
-model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name = model_name,
-    max_seq_length = max_seq_length,
-    load_in_4bit = True,   # 4-bit quant
-    fast_inference = True, # vLLM backend
-    max_lora_rank = lora_rank,
-    gpu_memory_utilization = 0.5,
+print("Loading the Doctor (policy) model ...")
+doctor_model, doctor_tokenizer = FastLanguageModel.from_pretrained(
+    model_name=doctor_model_name,
+    max_seq_length=max_seq_length,
+    load_in_4bit=True,
+    fast_inference=True,
+    max_lora_rank=lora_rank,
+    gpu_memory_utilization=0.5,
 )
 
-print("Attaching LoRA ...")
-model = FastLanguageModel.get_peft_model(
-    model,
-    r = lora_rank,
-    target_modules = [
+doctor_model = FastLanguageModel.get_peft_model(
+    doctor_model,
+    r=lora_rank,
+    target_modules=[
         "q_proj", "k_proj", "v_proj", "o_proj",
         "gate_proj", "up_proj", "down_proj",
     ],
-    lora_alpha = lora_rank,
-    use_gradient_checkpointing = "unsloth",
-    random_state = 3407,
+    lora_alpha=lora_rank,
+    use_gradient_checkpointing="unsloth",
+    random_state=42,
 )
 
-print("Model + LoRA ready.")
+# Instead of loading GPT-4o-mini locally, we will call it via the OpenAI API.
+print("Using OpenAI API for GPT-4o-mini as Patient & Judge roles ...")
 
 ########################################
-# 2. Doctor–Patient Scenario
+# 2. OpenAI API Wrappers for GPT-4o-Mini Patient & Judge Functions
 ########################################
 
 COMMON_DISEASES = [
@@ -81,354 +91,266 @@ COMMON_DISEASES = [
     "Mononucleosis",
 ]
 
-SYSTEM_PROMPT = """
-You are a Doctor diagnosing a patient. Always provide:
-<reason> your chain-of-thought reasoning here </reason>
-Then provide short visible text for the patient.
+def pick_hidden_disease():
+    return random.choice(COMMON_DISEASES)
 
-When you conclude, provide a final line like:
-Final diagnosis: XYZ
-
-Some possibilities are:
-
-   "Influenza",
-    "Common cold"
+def patient_system_prompt(disease: str):
+    """
+    The system prompt for GPT-4o-mini in 'patient' mode.
+    Instruct it to roleplay as if it has 'disease'. 
+    Don't reveal it unless the Doctor's final diagnosis matches or asks for it.
+    """
+    return f"""System:
+You are a patient with a hidden disease: {disease}.
+Roleplay your symptoms. Do NOT reveal the disease unless the Doctor specifically says "Final diagnosis: {disease}" or directly asks for it by name.
+If the Doctor keeps asking questions, answer them accordingly.
 """
+
+def call_patient_model(conversation_visible, max_new_tokens=128, temperature=0.7):
+    """
+    Call GPT-4o-mini as Patient via the OpenAI API.
+    The conversation_visible is a list of message dicts.
+    Returns the patient's response as a string.
+    """
+    response = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=conversation_visible,
+        max_tokens=max_new_tokens,
+        temperature=temperature,
+    )
+    return response.choices[0].message.content.strip()
+
+def judge_system_prompt(conversation_with_reason: str, hidden_disease: str):
+    """
+    The system prompt for GPT-4o-mini acting as the Judge.
+    Pass the full conversation (including <reason> blocks) and the hidden disease.
+    """
+    return f"""System:
+You are a medical conversation evaluator (the Judge).
+Below is the entire conversation (including the Doctor's <reason> blocks).
+The hidden disease the Patient had was: {hidden_disease}
+
+Please rate how well the Doctor performed on:
+1) Asking relevant questions
+2) Providing correct or near-correct final diagnosis
+3) Clarity and logical reasoning in the <reason> blocks
+
+Return a SINGLE float in [0..1] (the FIRST float you mention),
+where 0 means extremely poor, 1 means excellent.
+
+Conversation:
+{conversation_with_reason}
+
+Now give me the single float:
+"""
+
+def call_judge_model(conversation_with_reason: str, hidden_disease: str, max_new_tokens=64, temperature=0.0):
+    """
+    Call GPT-4o-mini as Judge via the OpenAI API.
+    Parses out the first float in [0..1] from the response.
+    """
+    system_text = judge_system_prompt(conversation_with_reason, hidden_disease)
+    messages = [{"role": "system", "content": system_text}]
+    response = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=messages,
+        max_tokens=max_new_tokens,
+        temperature=temperature,
+    )
+    raw_judge = response.choices[0].message.content.strip()
+    match = re.search(r"\b0(\.\d+)?\b|\b1(\.0+)?\b", raw_judge)
+    if match:
+        val = float(match.group(0))
+        return max(0.0, min(1.0, val))
+    return 0.0
+
+########################################
+# 3. The DoctorGame with OpenAI API for GPT-4o Patient & Judge
+########################################
 
 MAX_TURNS = 5
 
 class DoctorGame:
     """
-    Multi-turn scenario:
-      - Hidden disease chosen randomly
-      - The Doctor must produce <reason> blocks + visible text
-      - We end if "Final diagnosis: X" is produced or we exceed MAX_TURNS
-      - We do partial-credit AND a base reward if any final diagnosis is given
+    Manages a multi-turn conversation:
+      - A hidden disease.
+      - The Doctor sees partial context.
+      - The Patient is a GPT-4o-mini call via the OpenAI API.
+      - Stores conv_with_reason (Doctor's <reason> included) and conv_no_reason (visible text).
+      - After final turn, calls GPT-4o-mini as Judge for final reward in [0..1].
     """
 
     def __init__(self):
-        self.hidden_disease = random.choice(COMMON_DISEASES)
+        self.hidden_disease = pick_hidden_disease()
+        self.conv_with_reason = []
+        self.conv_no_reason = []
         self.turn_count = 0
         self.done = False
+        # System prompt for the patient (the Doctor does not see this)
+        self.patient_system = patient_system_prompt(self.hidden_disease)
 
-    def is_done(self):
-        return self.done or (self.turn_count >= MAX_TURNS)
+    def remove_reason_tags(self, text: str) -> str:
+        return re.sub(r"<reason>.*?</reason>", "", text, flags=re.DOTALL)
 
     def parse_final_diagnosis(self, text: str) -> str:
-        """If there's 'Final diagnosis: X', return X. Else ''."""
         match = re.search(r"Final\s*diagnosis:\s*(.*)", text, re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-        return ""
+        return match.group(1).strip() if match else ""
 
-    def compute_reward(self, final_guess: str) -> float:
+    def step_doctor(self, doc_text: str):
         """
-        If final_guess is non-empty => base reward of 0.2
-        Then partial-credit if it matches hidden disease.
+        Processes Doctor's turn, storing both full text and visible text.
+        Sets done if "Final diagnosis:" is present.
         """
-        if not final_guess:
-            # no final diagnosis => 0
-            return 0.0
+        self.conv_with_reason.append({"role": "doctor", "content": doc_text})
+        visible = self.remove_reason_tags(doc_text)
+        self.conv_no_reason.append({"role": "doctor", "content": visible})
+        if "Final diagnosis:" in visible:
+            self.done = True
 
-        # base reward for providing ANY final diagnosis
-        base = 0.2
+    def step_patient(self):
+        """
+        Calls GPT-4o-mini as Patient via the OpenAI API.
+        The patient sees only the visible conversation plus a system message.
+        """
+        if self.done:
+            return
+        messages = [{"role": "system", "content": self.patient_system}] + self.conv_no_reason
+        pat_text = call_patient_model(messages, max_new_tokens=128, temperature=0.7)
+        self.conv_with_reason.append({"role": "patient", "content": pat_text})
+        self.conv_no_reason.append({"role": "patient", "content": pat_text})
 
-        guess_lower = final_guess.lower()
-        disease_lower = self.hidden_disease.lower()
+    def run_episode(self, doctor_model, doctor_system_prompt: str):
+        """
+        Runs the multi-turn conversation:
+          - Up to MAX_TURNS or until the Doctor gives a final diagnosis.
+          - After completion, calls the Judge for a final numeric score.
+        """
+        self.turn_count = 0
+        while not self.done and self.turn_count < MAX_TURNS:
+            self.turn_count += 1
+            doc_input = self._build_doctor_prompt(doctor_system_prompt)
+            doc_outs = doctor_model.fast_generate([doc_input], max_new_tokens=256, temperature=0.7)
+            doc_text = doc_outs[0]
+            self.step_doctor(doc_text)
+            if not self.done:
+                self.step_patient()
+        return self.final_judge_reward()
 
-        # if exact match => 1.0
-        if guess_lower == disease_lower:
-            return 1.0
+    def _build_doctor_prompt(self, doctor_system_prompt: str) -> str:
+        """
+        Combines the doctor's system prompt with visible conversation history,
+        ending with "Doctor:" as the cue for the Doctor's reply.
+        """
+        text = doctor_system_prompt
+        for turn in self.conv_no_reason:
+            text += f"{turn['role'].title()}: {turn['content']}\n"
+        text += "Doctor:"
+        return text
 
-        # partial match => 0.8
-        if guess_lower in disease_lower or disease_lower in guess_lower:
-            return 0.8
-
-        # else just the base for "some guess"
-        return base
+    def final_judge_reward(self) -> float:
+        """
+        Gathers the full conversation (with <reason> tags) and calls GPT-4o-mini as Judge.
+        """
+        conv_str = ""
+        for turn in self.conv_with_reason:
+            conv_str += f"{turn['role'].title()}: {turn['content']}\n"
+        return call_judge_model(conv_str, self.hidden_disease)
 
 ########################################
-# 3. Multi-Turn Generation
+# 4. Custom Trainer with multi_turn_generation
 ########################################
 
-class DoctorGRPOTrainer(UnslothGRPOTrainer):
-    """
-    Similar to Tic-Tac-Toe's CustomGRPOTrainer, but for Doctor scenario.
-    We override multi_turn_generation and parse "Final diagnosis: X".
-    """
+DOCTOR_SYSTEM_PROMPT = """
+System:
+You are an AI Doctor. Each time you speak, you MUST include a hidden chain-of-thought
+in the format <reason> ... </reason>. Then provide the visible text for the patient.
 
-    def __init__(self, *args, game_object=None, **kwargs):
-        self.game_object_factory = game_object
-        super().__init__(*args, **kwargs)
+If by your final turn you haven't said: "Final diagnosis: XYZ", do so and end.
+
+Possible diseases:
+- Influenza
+- Common cold
+- Strep throat
+- ...
+"""
+
+class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
+    """
+    Overrides multi_turn_generation to run a DoctorGame with GPT-4o roles
+    via the OpenAI API for the Patient and Judge.
+    """
 
     def multi_turn_generation(self, prompt, model, tokenizer, generation_config, max_new_tokens=50, game_object=None):
-        print("============ Starting a new Doctor–Patient episode ============")
-        game = self.game_object_factory() if self.game_object_factory else None
-        if not game:
-            raise ValueError("No game_object_factory provided")
+        print("===== Starting a new Doctor–Patient Episode with GPT-4o API roles =====")
+        scenario = DoctorGame()
+        final_score = scenario.run_episode(model, DOCTOR_SYSTEM_PROMPT)
+        # Return dummy token IDs since multi-turn generation isn't tokenized fully here.
+        completion_ids = [0, 1, 2]
+        return completion_ids, final_score
 
-        full_text = prompt
-        total_reward = 0.0
-        completion_ids = []
-
-        while not game.is_done():
-            outputs = self.llm.generate(
-                [full_text],
-                sampling_params=self.sampling_params,
-                use_tqdm=False
-            )
-            new_text = outputs[0].outputs[0].text
-            new_token_ids = outputs[0].outputs[0].token_ids
-
-            full_text += new_text
-            completion_ids.extend(new_token_ids)
-            game.turn_count += 1
-
-            # Check final diagnosis
-            diag_match = re.search(r"Final\s*diagnosis:\s*(.*)", new_text, re.IGNORECASE)
-            if diag_match:
-                final_guess = diag_match.group(1).strip()
-                game.done = True
-                diag_reward = game.compute_reward(final_guess)
-                total_reward += diag_reward
-                print(f"Doctor final guess: {final_guess} => reward={diag_reward:.3f}")
-                break
-
-            if game.turn_count >= MAX_TURNS:
-                # no final diagnosis => reward=0 for that
-                print("No final diagnosis after max turns => 0 reward")
-                break
-
-            # Insert a minimal "patient" message
-            patient_text = "Patient: I still have the same symptoms, please refine your diagnosis.\n"
-            full_text += patient_text
-
-        return completion_ids, total_reward
-
-    def _prepare_inputs(self, inputs: dict):
-        """
-        Identical approach to your Tic-Tac-Toe code:
-          - gather all prompts
-          - multi_turn_generation on main process
-          - parse final rewards
-          - compute advantage
-          - return RL data
-        """
-        if not hasattr(self, "generation_config"):
-            if self.args.use_vllm:
-                self.generation_config = self.sampling_params
-            else:
-                self.generation_config = GenerationConfig(
-                    max_new_tokens=self.max_completion_length,
-                    do_sample=True,
-                    temperature=self.args.temperature,
-                    pad_token_id=self.processing_class.pad_token_id,
-                )
-        device = self.accelerator.device
-
-        # gather prompts
-        prompts = [x["prompt"] for x in inputs]
-        prompts_text = [
-            maybe_apply_chat_template(example, self.processing_class)["prompt"] 
-            for example in inputs
-        ]
-
-        # tokenize
-        prompt_inputs = self.processing_class(
-            prompts_text,
-            return_tensors="pt",
-            padding=True,
-            padding_side="left",
-            add_special_tokens=False
-        )
-        prompt_ids = prompt_inputs["input_ids"].to(device)
-        prompt_mask = prompt_inputs["attention_mask"].to(device)
-
-        if self.max_prompt_length is not None:
-            prompt_ids = prompt_ids[:, -self.max_prompt_length:]
-            prompt_mask = prompt_mask[:, -self.max_prompt_length:]
-
-        if self.args.use_vllm:
-            if self.state.global_step != self._last_loaded_step:
-                self._move_model_to_vllm()
-                self._last_loaded_step = self.state.global_step
-
-            all_prompts_text = gather_object(prompts_text)
-
-            if self.accelerator.is_main_process:
-                completion_ids_list = []
-                game_rewards_list = []
-                for ptxt in all_prompts_text:
-                    cids, rew = self.multi_turn_generation(
-                        ptxt, self.model, self.processing_class, self.generation_config,
-                        max_new_tokens=self.max_completion_length
-                    )
-                    completion_ids_list.append(cids)
-                    game_rewards_list.append(rew)
-            else:
-                completion_ids_list = [None]*len(all_prompts_text)
-                game_rewards_list = [0.0]*len(all_prompts_text)
-
-            completion_ids_list = broadcast_object_list(completion_ids_list, from_process=0)
-            game_rewards_list = broadcast_object_list(game_rewards_list, from_process=0)
-
-            game_rewards_tensor = torch.tensor(game_rewards_list, dtype=torch.float32, device=device)
-
-            slice_ = slice(
-                self.accelerator.process_index * len(prompts),
-                (self.accelerator.process_index + 1)*len(prompts)
-            )
-            completion_ids_list = completion_ids_list[slice_]
-
-            # pad
-            completion_ids_tensors = [torch.tensor(x, device=device) for x in completion_ids_list]
-            completion_ids_padded = pad(completion_ids_tensors, padding_value=self.processing_class.pad_token_id)
-
-            prompt_completion_ids = torch.cat([prompt_ids, completion_ids_padded], dim=1)
-        else:
-            raise NotImplementedError("This example requires use_vllm=True")
-
-        # mask after first EOS
-        is_eos = completion_ids_padded == self.processing_class.eos_token_id
-        eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device)
-        eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
-        seq_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
-        completion_mask = (seq_indices <= eos_idx.unsqueeze(1)).int()
-        attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
-
-        logits_to_keep = completion_ids_padded.size(1)
-
-        # log-likelihood vs ref model if any
-        with torch.inference_mode(), torch.amp.autocast(
-            device_type='cuda',
-            dtype=(torch.float16 if os.environ.get('ACCELERATE_MIXED_PRECISION','fp16')=='fp16'
-                   else torch.bfloat16)
-        ) if not torch.is_autocast_enabled('cuda') else nullcontext():
-            if self.ref_model is not None:
-                ref_per_token_logps = self._get_per_token_logps(
-                    self.ref_model, prompt_completion_ids, attention_mask, logits_to_keep
-                )
-            else:
-                with self.accelerator.unwrap_model(self.model, keep_fp32_wrapper=False).disable_adapter():
-                    ref_per_token_logps = self._get_per_token_logps(
-                        self.model, prompt_completion_ids, attention_mask, logits_to_keep
-                    )
-
-        # decode completions
-        completions_text = self.processing_class.batch_decode(completion_ids_padded, skip_special_tokens=True)
-
-        # For the single reward function (which returns 0),
-        # we gather that. Then we add the actual game_rewards_tensor
-        # in the same advantage flow
-        rewards_per_func = torch.zeros(len(prompts), len(self.reward_funcs), device=device)
-        for i,(reward_func,reward_proc_class) in enumerate(zip(self.reward_funcs,self.reward_processing_classes)):
-            keys = [k for k in inputs[0] if k not in ["prompt","completion"]]
-            reward_kwargs = {k: [ex[k] for ex in inputs] for k in keys}
-            out_rews = reward_func(prompts=prompts, completions=completions_text, **reward_kwargs)
-            rewards_per_func[:,i] = torch.tensor(out_rews, dtype=torch.float32, device=device)
-
-        rewards_per_func = gather(rewards_per_func)
-        game_rewards_tensor = gather(game_rewards_tensor)
-
-        # Combine them
-        extended = torch.cat([rewards_per_func, game_rewards_tensor.unsqueeze(1)], dim=1)
-
-        # We assume we have one function => self.reward_weights is shape (1,). We'll add one for the game reward
-        if not hasattr(self, 'reward_weights'):
-            self.reward_weights = torch.ones(1, device=device)
-        game_weight = torch.tensor([1.0], device=device)
-        new_weights = torch.cat([self.reward_weights.to(device), game_weight])
-
-        final_rewards = (extended * new_weights.unsqueeze(0)).sum(dim=1)
-
-        # advantage calc with self.num_generations
-        mg = final_rewards.view(-1,self.num_generations).mean(dim=1)
-        sg = final_rewards.view(-1,self.num_generations).std(dim=1)
-
-        mg = mg.repeat_interleave(self.num_generations, dim=0)
-        sg = sg.repeat_interleave(self.num_generations, dim=0)
-        advantages = (final_rewards - mg)/(sg + 1e-4)
-
-        local_slice = slice(
-            self.accelerator.process_index * len(prompts),
-            (self.accelerator.process_index + 1)*len(prompts)
-        )
-        advantages = advantages[local_slice]
-
-        # logging
-        self._metrics["rewards/game_reward"].append(game_rewards_tensor.mean().item())
-        self._metrics["reward"].append(final_rewards.mean().item())
-        self._metrics["reward_std"].append(sg.mean().item())
-
-        # Return RL data
-        return {
-            "prompt_ids": prompt_ids,
-            "prompt_mask": prompt_mask,
-            "completion_ids": completion_ids_padded,
-            "completion_mask": completion_mask,
-            "ref_per_token_logps": ref_per_token_logps,
-            "advantages": advantages,
-        }
+    # Other methods (like _prepare_inputs) remain as in your existing trainer.
 
 ########################################
-# 4. Reward Stub & Build Dataset
+# 5. Reward Function Stub
 ########################################
 
-def doctor_game_reward(prompts, completions, **kwargs) -> list[float]:
-    """Stub that always returns 0, the real reward is from multi_turn_generation."""
-    return [0.0]*len(prompts)
+def doctor_game_reward_stub(prompts, completions, **kwargs) -> list[float]:
+    """
+    Stub reward function (the final reward comes from the Judge).
+    """
+    return [0.0] * len(prompts)
 
-def create_doctor_database():
-    """
-    We'll create a single row with a system+user message in 'prompt' field.
-    The code uses 'prompt' just like in Tic-Tac-Toe.
-    """
+########################################
+# 6. Minimal Training Setup
+########################################
+
+def build_dataset():
     row = {
         "prompt": [
-            {"role":"system","content":SYSTEM_PROMPT},
-            {"role":"user","content":"I have a headache and fatigue, can you help me?"}
+            {"role": "system", "content": "You are an AI Doctor. Provide a diagnosis eventually."},
+            {"role": "user", "content": "I have a headache, any ideas?"}
         ],
         "answer": ""
     }
     return [row]
 
-########################################
-# 5. Configure & Train
-########################################
-
-config = GRPOConfig(
+training_args = GRPOConfig(
     use_vllm=True,
     learning_rate=5e-6,
-    temperature=0.9,
-    logging_steps=1,
-    max_steps=300,       # just a small demo
-    save_steps=10,
-    max_prompt_length=max_seq_length-512,
+    temperature=0.7,
+    logging_steps=5,
+    max_steps=40,      # small demonstration
+    save_steps=20,
+    max_prompt_length=1024,
     max_completion_length=512,
-    num_generations=5,  # generate 5 completions per scenario => better advantage
+    num_generations=2, # multiple completions for advantage
     output_dir=f"{save_path}/outputs",
 )
 
-df = pd.DataFrame(create_doctor_database())
+df = pd.DataFrame(build_dataset())
 train_dataset = Dataset.from_pandas(df)
 
-trainer = DoctorGRPOTrainer(
-    model=model,
-    processing_class=tokenizer,
-    reward_funcs=[doctor_game_reward],
-    args=config,
+trainer = DoctorWithGpt4oTrainer(
+    model=doctor_model,
+    processing_class=doctor_tokenizer,
+    reward_funcs=[doctor_game_reward_stub],
+    args=training_args,
     train_dataset=train_dataset,
-    game_object=DoctorGame
 )
 
-print("Starting training ...")
-trainer.train()
+########################################
+# 7. Train
+########################################
 
-# Save final LoRA & checkpoint
-model.save_lora(f"{save_path}/doctor_grpo_saved_lora")
-cp_path = f"{save_path}/doctor_checkpoint"
-trainer.save_model(cp_path)
-trainer.state.save_to_json(f"{cp_path}/trainer_state.json")
-model.save_lora(f"{save_path}/doctor_final_lora")
+if __name__ == "__main__":
+    print("Starting training with GPT-4o API as Patient + Judge ...")
+    trainer.train()
 
-print("Training complete!")
+    # Save final LoRA & checkpoint
+    doctor_model.save_lora(f"{save_path}/doctor_grpo_saved_lora")
+    cp_path = f"{save_path}/doctor_checkpoint"
+    trainer.save_model(cp_path)
+    trainer.state.save_to_json(f"{cp_path}/trainer_state.json")
+    doctor_model.save_lora(f"{save_path}/doctor_final_lora")
+
+    print("Training complete!")
