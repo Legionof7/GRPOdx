@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Doctor–Patient GRPO (Multi-Turn) with a base reward for any final diagnosis + 5 completions per scenario.
-   Patient and Judge roles are implemented via GPT-4o-mini (OpenAI API), and logging is preserved.
+   Patient and Judge now use GPT-4o-mini via the OpenAI API.
 """
 
 ########################################
@@ -59,7 +59,7 @@ max_seq_length = 2048
 lora_rank = 32
 model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 
-logger.info("Loading base model ...")
+print("Loading base model ...")
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=model_name,
     max_seq_length=max_seq_length,
@@ -69,7 +69,7 @@ model, tokenizer = FastLanguageModel.from_pretrained(
     gpu_memory_utilization=0.5,
 )
 
-logger.info("Attaching LoRA ...")
+print("Attaching LoRA ...")
 model = FastLanguageModel.get_peft_model(
     model,
     r=lora_rank,
@@ -77,13 +77,15 @@ model = FastLanguageModel.get_peft_model(
                     "gate_proj", "up_proj", "down_proj"],
     lora_alpha=lora_rank,
     use_gradient_checkpointing="unsloth",
-    random_state=42,
+    random_state=3407,
 )
-logger.info("Model + LoRA ready.")
+
+print("Model + LoRA ready.")
+logger.info("Doctor model loaded with LoRA rank %d", lora_rank)
 logger.info("Using OpenAI API for GPT-4o-mini as Patient & Judge roles ...")
 
 ########################################
-# 2. GPT-4o-mini Patient & Judge Functions
+# 2. Doctor–Patient Scenario & GPT-4o API Functions
 ########################################
 
 COMMON_DISEASES = [
@@ -226,15 +228,15 @@ class DoctorGame:
         self.done = False
         self.conv_with_reason = []
         self.conv_no_reason = []
-
         while not self.done and self.turn_count < MAX_TURNS:
             self.turn_count += 1
             doc_input = self._build_doctor_prompt(doctor_system_prompt)
             print(f"Generating doctor response for turn {self.turn_count}...")
-            doc_outs = doctor_model.fast_generate(
+            doc_outs = doctor_model.generate(
                 [doc_input],
-                max_tokens=256,
+                max_new_tokens=256,
                 temperature=0.7,
+                do_sample=True,
             )
             if hasattr(doc_outs[0], "outputs"):
                 doc_text = doc_outs[0].outputs[0].text
@@ -245,7 +247,6 @@ class DoctorGame:
             if not self.done:
                 print("--- Now getting patient response ---")
                 self.step_patient()
-
         conv_str = ""
         for turn in self.conv_with_reason:
             conv_str += f"{turn['role'].title()}: {turn['content']}\n"
@@ -277,7 +278,7 @@ Possible diseases:
 """
 
 class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
-    def multi_turn_generation(self, prompt, model, tokenizer, generation_config, max_tokens=50, game_object=None):
+    def multi_turn_generation(self, prompt, model, tokenizer, generation_config, max_new_tokens=50, game_object=None):
         print("===== STARTING Doctor–Patient Episode with GPT-4o API =====")
         scenario = self.game_object_factory() if self.game_object_factory else DoctorGame()
         final_reward = scenario.run_episode(model, DOCTOR_SYSTEM_PROMPT)
@@ -296,7 +297,6 @@ class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
                     pad_token_id=self.processing_class.pad_token_id,
                 )
         device = self.accelerator.device
-
         prompts = [x["prompt"] for x in inputs]
         prompts_text = []
         for example in inputs:
@@ -305,15 +305,12 @@ class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
                 text += f"{msg['role'].title()}: {msg['content']}\n"
             text += "Doctor:"
             prompts_text.append(text)
-
         prompt_ids = torch.tensor([[0]], device=device)
         prompt_mask = torch.tensor([[1]], device=device)
-
         if self.args.use_vllm:
             if self.state.global_step != self._last_loaded_step:
                 self._move_model_to_vllm()
                 self._last_loaded_step = self.state.global_step
-
             all_prompts_text = gather_object(prompts_text)
             if self.accelerator.is_main_process:
                 completion_ids_list = []
@@ -321,17 +318,15 @@ class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
                 for ptxt in all_prompts_text:
                     cids, rew = self.multi_turn_generation(
                         ptxt, self.model, self.processing_class, self.generation_config,
-                        max_tokens=self.max_completion_length
+                        max_new_tokens=self.max_completion_length
                     )
                     completion_ids_list.append(cids)
                     game_rewards_list.append(rew)
             else:
                 completion_ids_list = [None] * len(all_prompts_text)
                 game_rewards_list = [0.0] * len(all_prompts_text)
-
             completion_ids_list = broadcast_object_list(completion_ids_list, from_process=0)
             game_rewards_list = broadcast_object_list(game_rewards_list, from_process=0)
-
             game_rewards_tensor = torch.tensor(game_rewards_list, dtype=torch.float32, device=device)
             from trl.trainer.grpo_trainer import pad
             completion_ids_tensors = [torch.tensor(x, device=device) for x in completion_ids_list]
@@ -339,25 +334,20 @@ class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
             prompt_completion_ids = torch.cat([prompt_ids, completion_ids_padded], dim=1)
         else:
             raise NotImplementedError("This example requires use_vllm=True")
-
         batch_size = len(inputs)
         completion_length = completion_ids_padded.size(1)
         ref_per_token_logps = torch.zeros(batch_size, completion_length, device=device)
         game_rewards_tensor = gather(game_rewards_tensor)
-
         final_rewards = game_rewards_tensor
         mg = final_rewards.mean()
         sg = final_rewards.std() if final_rewards.size(0) > 1 else 1.0
         advantages = (final_rewards - mg) / (sg + 1e-4)
-
         prompt_mask = torch.ones(batch_size, 1, dtype=torch.int, device=device)
         completion_mask = torch.ones(batch_size, completion_length, dtype=torch.int, device=device)
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
-
         self._metrics["rewards/game_reward"].append(final_rewards.mean().item())
         self._metrics["reward"].append(final_rewards.mean().item())
         self._metrics["reward_std"].append(final_rewards.std().item() if final_rewards.size(0) > 1 else 0.0)
-
         return {
             "prompt_ids": prompt_ids,
             "prompt_mask": prompt_mask,
@@ -375,11 +365,9 @@ def doctor_game_reward(prompts, completions, **kwargs) -> list[float]:
     return [0.0] * len(prompts)
 
 def create_doctor_database():
-    global SYSTEM_PROMPT
     row = {
         "prompt": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": "I have a headache and fatigue, can you help me?"}
+            {"role": "assistant", "content": "I have a headache and fatigue, can you help me?"}
         ],
         "answer": ""
     }
@@ -398,29 +386,47 @@ config = GRPOConfig(
     save_steps=10,
     max_prompt_length=max_seq_length-512,
     max_completion_length=512,
-    num_generations=5,  # 5 completions per scenario
+    num_generations=5,  # 5 completions per scenario => better advantage
     output_dir=f"/content/drive/MyDrive/UnslothGRPO/doctorExample/outputs",
 )
 
 df = pd.DataFrame(create_doctor_database())
 train_dataset = Dataset.from_pandas(df)
 
-trainer = DoctorGRPOTrainer(
-    model=model,
-    processing_class=tokenizer,
-    reward_funcs=[doctor_game_reward],
-    args=config,
-    train_dataset=train_dataset,
-    game_object=DoctorGame
-)
+def create_trainer(model, tokenizer):
+    trainer = DoctorGRPOTrainer(
+        model=model,
+        processing_class=tokenizer,
+        reward_funcs=[doctor_game_reward],
+        args=config,
+        train_dataset=train_dataset,
+        game_object=DoctorGame
+    )
+    return trainer
 
-print("Starting training ...")
-trainer.train()
+########################################
+# 7. Run
+########################################
 
-# Save final LoRA & checkpoint
-model.save_lora(f"/content/drive/MyDrive/UnslothGRPO/doctorExample/doctor_grpo_saved_lora")
-cp_path = f"/content/drive/MyDrive/UnslothGRPO/doctorExample/doctor_checkpoint"
-trainer.save_model(cp_path)
-trainer.state.save_to_json(f"{cp_path}/trainer_state.json")
-model.save_lora(f"/content/drive/MyDrive/UnslothGRPO/doctorExample/doctor_final_lora")
-print("Training complete!")
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Train a doctor model with GPT-4o via OpenAI API")
+    parser.add_argument("--openai_api_key", type=str, default="")
+    args = parser.parse_args()
+
+    if args.openai_api_key:
+        openai.api_key = args.openai_api_key
+        print("✅ OpenAI API key set from command line argument")
+    elif not openai.api_key:
+        print("❌ No OpenAI API key. Please provide with --openai_api_key. Exiting.")
+        exit(1)
+
+    trainer = create_trainer(doctor_model, doctor_tokenizer)
+    trainer.train()
+
+    model.save_lora(f"/content/drive/MyDrive/UnslothGRPO/doctorExample/doctor_grpo_saved_lora")
+    cp_path = f"/content/drive/MyDrive/UnslothGRPO/doctorExample/doctor_checkpoint"
+    trainer.save_model(cp_path)
+    trainer.state.save_to_json(f"{cp_path}/trainer_state.json")
+    model.save_lora(f"/content/drive/MyDrive/UnslothGRPO/doctorExample/doctor_final_lora")
+    print("Training complete!")
