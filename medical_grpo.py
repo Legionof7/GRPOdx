@@ -5,9 +5,8 @@ Using GPT-4o-mini via the OpenAI API for both:
   - The Patient (roleplaying hidden disease),
   - The Judge (scoring the final conversation in [0..1]).
 
-Fixed: Now we do not pass 'sampling_params' to .generate(), 
-       instead using standard args like max_new_tokens, do_sample, temperature.
-       This avoids the ValueError about unused 'sampling_params'.
+Fixed: Now we do not pass 'sampling_params' or 'max_new_tokens';
+instead we use 'max_tokens' (which is accepted by fast_generate).
 """
 
 ########################################
@@ -119,9 +118,6 @@ If the Doctor keeps asking questions, answer them accordingly.
 """
 
 def call_patient_model(conversation_visible, max_new_tokens=128, temperature=0.7):
-    """
-    Calls GPT-4o-mini via the OpenAI API in 'patient' mode.
-    """
     print(f"\n🔄 OPENAI API CALL - Patient Role")
     if not openai.api_key:
         print("❌ ERROR: No OpenAI API key provided. Returning dummy text.")
@@ -131,7 +127,6 @@ def call_patient_model(conversation_visible, max_new_tokens=128, temperature=0.7
         system_message = next((msg for msg in conversation_visible if msg["role"] == "system"), None)
         if system_message:
             openai_messages.append({"role": "system", "content": system_message["content"]})
-
         for msg in conversation_visible:
             if msg["role"] == "system":
                 continue
@@ -139,7 +134,6 @@ def call_patient_model(conversation_visible, max_new_tokens=128, temperature=0.7
                 openai_messages.append({"role": "user", "content": msg["content"]})
             elif msg["role"] == "patient":
                 openai_messages.append({"role": "assistant", "content": msg["content"]})
-
         client = OpenAI(api_key=openai.api_key)
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -174,9 +168,6 @@ Now give me the single float:
 """
 
 def call_judge_model(conversation_with_reason: str, hidden_disease: str, max_new_tokens=64, temperature=0.0):
-    """
-    Calls GPT-4o-mini via the OpenAI API in 'judge' mode.
-    """
     print(f"\n🔄 OPENAI API CALL - Judge Role")
     if not openai.api_key:
         print("❌ ERROR: No OpenAI API key provided. Returning default 0.0")
@@ -227,10 +218,6 @@ class DoctorGame:
         return match.group(1).strip() if match else ""
 
     def step_doctor(self, doc_text: str):
-        """
-        Save doc_text in conv_with_reason. Also produce a 'visible' version for conv_no_reason.
-        If doc_text has "Final diagnosis:", set done = True.
-        """
         self.conv_with_reason.append({"role": "doctor", "content": doc_text})
         visible = self.remove_reason_tags(doc_text)
         self.conv_no_reason.append({"role": "doctor", "content": visible})
@@ -238,10 +225,6 @@ class DoctorGame:
             self.done = True
 
     def step_patient(self):
-        """
-        Calls GPT-4o-mini with the conv_no_reason as the conversation context.
-        Adds the patient's reply to both conv_with_reason and conv_no_reason.
-        """
         if self.done:
             return
         openai_messages = [{"role": "system", "content": self.patient_system}]
@@ -255,11 +238,6 @@ class DoctorGame:
         self.conv_no_reason.append({"role": "patient", "content": pat_text})
 
     def run_episode(self, doctor_model, doctor_system_prompt: str):
-        """
-        The main loop: up to MAX_TURNS.
-        The Doctor is a local model with LoRA. The Patient is GPT-4o via openai api.
-        Finally, we call GPT-4o in judge mode for a reward in [0..1].
-        """
         self.turn_count = 0
         self.done = False
         self.conv_with_reason = []
@@ -267,33 +245,26 @@ class DoctorGame:
 
         while not self.done and self.turn_count < MAX_TURNS:
             self.turn_count += 1
-            # Build prompt for the doctor
             doc_input = self._build_doctor_prompt(doctor_system_prompt)
             print(f"Generating doctor response for turn {self.turn_count}...")
 
-            # Use doc_model.generate with standard arguments (NOT sampling_params)
+            # Use fast_generate with standard arguments and 'max_tokens' instead of 'max_new_tokens'
             doc_outs = doctor_model.fast_generate(
                 [doc_input],
-                max_new_tokens=256,
+                max_tokens=256,
                 temperature=0.7,
             )
 
-            # In vLLM mode, doc_outs is a list of RequestOutput objects
-            # So we get doc_text from doc_outs[0].outputs[0].text or doc_outs[0]
             if hasattr(doc_outs[0], "outputs"):
                 doc_text = doc_outs[0].outputs[0].text
             else:
-                # fallback if the return is directly text
                 doc_text = doc_outs[0]
-
             print(f"Doctor response: {doc_text[:60]}...")
             self.step_doctor(doc_text)
-
             if not self.done:
                 print(f"--- Now getting patient response ---")
                 self.step_patient()
 
-        # Once done, call judge
         conv_str = ""
         for turn in self.conv_with_reason:
             conv_str += f"{turn['role'].title()}: {turn['content']}\n"
@@ -302,20 +273,14 @@ class DoctorGame:
         return reward
 
     def _build_doctor_prompt(self, doctor_system_prompt: str) -> str:
-        """
-        Combine the doc_system_prompt with all the visible text so far, 
-        end with "Doctor:". The model continues from there.
-        """
         text = doctor_system_prompt
         for turn in self.conv_no_reason:
-            role = turn["role"].title()
-            content = turn["content"]
-            text += f"{role}: {content}\n"
+            text += f"{turn['role'].title()}: {turn['content']}\n"
         text += "Doctor:"
         return text
 
 ########################################
-# 4. Custom Trainer overriding _prepare_inputs
+# 4. Custom Trainer: override _prepare_inputs
 ########################################
 
 DOCTOR_SYSTEM_PROMPT = """
@@ -333,23 +298,14 @@ Possible diseases:
 """
 
 class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
-    """
-    The critical fix: do NOT pass 'sampling_params=...' to doc_model.generate().
-    Instead, we specify standard .generate arguments like max_new_tokens=... etc.
-    """
-
-    def multi_turn_generation(self, prompt, model, tokenizer, generation_config, max_new_tokens=50, game_object=None):
+    def multi_turn_generation(self, prompt, model, tokenizer, generation_config, max_tokens=50, game_object=None):
         print("===== STARTING Doctor–Patient Episode with GPT-4o API =====")
         scenario = DoctorGame()
         final_reward = scenario.run_episode(model, DOCTOR_SYSTEM_PROMPT)
-        # Return dummy token IDs
-        completion_ids = [0,1,2]
+        completion_ids = [0, 1, 2]
         return completion_ids, final_reward
 
     def _prepare_inputs(self, inputs: dict):
-        """
-        Each "prompt" triggers a multi-turn conversation. We compute final reward from GPT-4o Judge.
-        """
         if not hasattr(self, "generation_config"):
             if self.args.use_vllm:
                 self.generation_config = self.sampling_params
@@ -371,7 +327,6 @@ class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
             text += "Doctor:"
             prompts_text.append(text)
 
-        # We'll do a small dummy tokenization
         prompt_ids = torch.tensor([[0]], device=device)
         prompt_mask = torch.tensor([[1]], device=device)
 
@@ -387,13 +342,13 @@ class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
                 for ptxt in all_prompts_text:
                     cids, rew = self.multi_turn_generation(
                         ptxt, self.model, self.processing_class, self.generation_config,
-                        max_new_tokens=self.max_completion_length
+                        max_tokens=self.max_completion_length
                     )
                     completion_ids_list.append(cids)
                     game_rewards_list.append(rew)
             else:
-                completion_ids_list = [None]*len(all_prompts_text)
-                game_rewards_list = [0.0]*len(all_prompts_text)
+                completion_ids_list = [None] * len(all_prompts_text)
+                game_rewards_list = [0.0] * len(all_prompts_text)
 
             completion_ids_list = broadcast_object_list(completion_ids_list, from_process=0)
             game_rewards_list = broadcast_object_list(game_rewards_list, from_process=0)
@@ -413,8 +368,8 @@ class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
 
         final_rewards = game_rewards_tensor
         mg = final_rewards.mean()
-        sg = final_rewards.std() if final_rewards.size(0)>1 else 1.0
-        advantages = (final_rewards - mg)/(sg + 1e-4)
+        sg = final_rewards.std() if final_rewards.size(0) > 1 else 1.0
+        advantages = (final_rewards - mg) / (sg + 1e-4)
 
         prompt_mask = torch.ones(batch_size, 1, dtype=torch.int, device=device)
         completion_mask = torch.ones(batch_size, completion_length, dtype=torch.int, device=device)
@@ -422,7 +377,7 @@ class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
 
         self._metrics["rewards/game_reward"].append(final_rewards.mean().item())
         self._metrics["reward"].append(final_rewards.mean().item())
-        self._metrics["reward_std"].append(final_rewards.std().item() if final_rewards.size(0)>1 else 0.0)
+        self._metrics["reward_std"].append(final_rewards.std().item() if final_rewards.size(0) > 1 else 0.0)
 
         return {
             "prompt_ids": prompt_ids,
@@ -434,7 +389,7 @@ class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
         }
 
 ########################################
-# 5. Reward Stub
+# 5. Reward Function Stub
 ########################################
 
 def doctor_game_reward_stub(prompts, completions, **kwargs) -> list[float]:
@@ -463,8 +418,7 @@ training_args = GRPOConfig(
     save_steps=5,
     max_prompt_length=1024,
     max_completion_length=512,
-    # If you want multiple completions for advantage:
-    num_generations=2,
+    num_generations=2,  # multiple completions for advantage
     output_dir="./doctor_outputs/checkpoints",
 )
 
