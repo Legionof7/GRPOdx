@@ -216,6 +216,9 @@ class DoctorGRPOTrainer(UnslothGRPOTrainer):
 
     def multi_turn_generation(self, prompt, model, tokenizer, generation_config, max_new_tokens=50, game_object=None):
         print("============ Starting a new Doctor–Patient episode ============")
+        print(f"Hidden disease: {game.hidden_disease}")
+        print("---------------------------------------------------------")
+        
         game = self.game_object_factory() if self.game_object_factory else None
         if not game:
             raise ValueError("No game_object_factory provided")
@@ -223,6 +226,10 @@ class DoctorGRPOTrainer(UnslothGRPOTrainer):
         full_text = prompt
         total_reward = 0.0
         completion_ids = []
+        conversation_history = []
+        
+        # Add initial prompt to conversation history
+        conversation_history.append(f"Patient initial query: {prompt.split('content\":\"')[-1].split('\"')[0]}")
 
         while not game.is_done():
             outputs = self.llm.generate(
@@ -236,6 +243,9 @@ class DoctorGRPOTrainer(UnslothGRPOTrainer):
             full_text += new_text
             completion_ids.extend(new_token_ids)
             game.turn_count += 1
+            
+            # Add doctor's response to conversation history
+            conversation_history.append(f"Doctor (Turn {game.turn_count}): {new_text}")
 
             # Check for final diagnosis in the doctor's output
             diag_match = re.search(r"Final\s*diagnosis:\s*(.*)", new_text, re.IGNORECASE)
@@ -254,6 +264,19 @@ class DoctorGRPOTrainer(UnslothGRPOTrainer):
             # Instead of a hardcoded patient message, simulate the patient's response via OpenAI API.
             patient_text = self.simulate_patient_response(full_text, game.hidden_disease)
             full_text += patient_text
+            
+            # Add patient's response to conversation history
+            conversation_history.append(f"Patient (Turn {game.turn_count}): {patient_text}")
+
+        # Print the full conversation at the end
+        print("\n========== Complete Conversation ==========")
+        print(f"Actual condition: {game.hidden_disease}")
+        print("-----------------------------------------")
+        for message in conversation_history:
+            print(message)
+            print("-----------------------------------------")
+        print(f"Total reward: {total_reward:.3f}")
+        print("===========================================\n")
 
         return completion_ids, total_reward
 
