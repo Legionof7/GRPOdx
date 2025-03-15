@@ -216,12 +216,13 @@ class DoctorGRPOTrainer(UnslothGRPOTrainer):
 
     def multi_turn_generation(self, prompt, model, tokenizer, generation_config, max_new_tokens=50, game_object=None):
         print("============ Starting a new Doctor–Patient episode ============")
-        print(f"Hidden disease: {game.hidden_disease}")
-        print("---------------------------------------------------------")
         
         game = self.game_object_factory() if self.game_object_factory else None
         if not game:
             raise ValueError("No game_object_factory provided")
+            
+        print(f"Hidden disease: {game.hidden_disease}")
+        print("---------------------------------------------------------")
 
         full_text = prompt
         total_reward = 0.0
