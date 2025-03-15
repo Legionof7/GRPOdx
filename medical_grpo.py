@@ -451,7 +451,7 @@ training_args = GRPOConfig(
     save_steps=5,
     max_prompt_length=1024,
     max_completion_length=512,
-    num_generations=1, # multiple completions => set >1 if you want advantage
+    num_generations=2, # multiple completions => set >1 if you want advantage
     output_dir="./doctor_outputs/checkpoints",
 )
 
