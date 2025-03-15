@@ -31,7 +31,10 @@ from trl.trainer.grpo_trainer import pad
 from unsloth_compiled_cache.UnslothGRPOTrainer import UnslothGRPOTrainer
 
 # NEW: Import OpenAI
-import openai
+from openai import OpenAI
+
+client = OpenAI(api_key=openai_api_key,
+api_key=self.args.openai_api_key)
 
 print("Imports complete.")
 
@@ -109,16 +112,13 @@ class DoctorGame:
     def __init__(self, openai_api_key: str = None):
         if openai_api_key:
             try:
-                openai.api_key = openai_api_key
                 prompt = ("Generate a plausible common medical condition (for example: Influenza, COVID-19, Migraine, etc.) "
                           "and provide only the name of the condition.")
-                response = openai.ChatCompletion.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.7,
-                    max_tokens=10
-                )
-                self.hidden_disease = response['choices'][0]['message']['content'].strip()
+                response = client.chat.completions.create(model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=10)
+                self.hidden_disease = response.choices[0].message.content.strip()
             except Exception as e:
                 print(f"OpenAI API error in generating condition: {e}")
                 self.hidden_disease = random.choice(COMMON_DISEASES)
@@ -175,7 +175,6 @@ class DoctorGRPOTrainer(UnslothGRPOTrainer):
         to simulate a patient who has the hidden condition but does not reveal it.
         """
         try:
-            openai.api_key = self.args.openai_api_key
             prompt = (
                 f"You are a patient who has the following condition: {hidden_disease}. "
                 "Answer the doctor's questions by describing your symptoms and feelings in a realistic manner "
@@ -183,16 +182,14 @@ class DoctorGRPOTrainer(UnslothGRPOTrainer):
                 f"{conversation_history}\n"
                 "Now, provide your next response as a message starting with 'Patient:'"
             )
-            response = openai.ChatCompletion.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "You are a patient simulating your condition."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7,
-                max_tokens=150
-            )
-            patient_text = response['choices'][0]['message']['content']
+            response = client.chat.completions.create(model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a patient simulating your condition."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=150)
+            patient_text = response.choices[0].message.content
         except Exception as e:
             print(f"OpenAI API error in simulating patient response: {e}")
             # Fallback to a default patient message if API call fails
