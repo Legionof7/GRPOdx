@@ -58,8 +58,8 @@ logger.info("Imports complete.")
 # 1. Load Doctor Model + LoRA
 ########################################
 
-# Paths & config
-save_path = "/content/drive/MyDrive/UnslothGRPO/doctorGPT4oExample"
+# Paths & config - save everything in current working directory
+save_path = "./doctor_outputs"
 os.makedirs(save_path, exist_ok=True)
 
 max_seq_length = 2048
@@ -351,8 +351,8 @@ class DoctorGame:
         """
         # Create all directories in path if they don't exist
         try:
-            # Force absolute path to current working directory
-            conversation_dir = "./conversations"
+            # Get the conversation directory from the global variable
+            conversation_dir = globals().get("CONVERSATION_DIR", "./conversations")
             
             # Make sure directory exists (create if it doesn't)
             if not os.path.exists(conversation_dir):
@@ -434,6 +434,11 @@ class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
     Each conversation is automatically saved to a text file in the 'conversations' directory.
     """
 
+    def __init__(self, *args, **kwargs):
+        # Store conversation directory if provided
+        self.conversation_dir = kwargs.pop("conversation_dir", "./conversations") if "conversation_dir" in kwargs else "./conversations"
+        super().__init__(*args, **kwargs)
+        
     def multi_turn_generation(self, prompt, model, tokenizer, generation_config, max_new_tokens=50, game_object=None):
         # Print a very visible start message
         start_msg = "===== Starting a new Doctor–Patient Episode with GPT-4o API roles ====="
@@ -442,8 +447,10 @@ class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
         print(start_msg)
         print("="*80)
         
-        # Create conversations directory if it doesn't exist (using relative path)
-        conversation_dir = "./conversations"
+        # Get the conversation directory from command line args if available
+        conversation_dir = getattr(self.args, "conversation_dir", self.conversation_dir)
+        
+        # Make sure the conversations directory exists
         if not os.path.exists(conversation_dir):
             try:
                 os.makedirs(conversation_dir, exist_ok=True)
@@ -451,12 +458,17 @@ class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
             except Exception as e:
                 print(f"⚠️ Warning: Could not create conversations directory: {str(e)}")
                 print("Will attempt to save directly in current directory as fallback.")
+                conversation_dir = "."
         else:
-            print(f"📁 Using existing conversation directory: {os.path.abspath(conversation_dir)}")
+            print(f"📁 Using conversation directory: {os.path.abspath(conversation_dir)}")
+        
+        # Set the global variable so other methods can use it
+        globals()["CONVERSATION_DIR"] = conversation_dir
         
         # Run the episode - this will automatically save the conversation to a file
         scenario = DoctorGame()
-        print(f"Conversations will be saved with ID: {scenario.conversation_id}")
+        print(f"Conversation will be saved with ID: {scenario.conversation_id}")
+        print(f"Saving to: {os.path.abspath(os.path.join(conversation_dir, scenario.conversation_id + '_*.txt'))}")
         
         final_score = scenario.run_episode(model, DOCTOR_SYSTEM_PROMPT)
         
@@ -500,19 +512,25 @@ training_args = GRPOConfig(
     max_prompt_length=1024,
     max_completion_length=512,
     num_generations=2, # multiple completions for advantage
-    output_dir=f"{save_path}/outputs",
+    output_dir="./doctor_outputs/checkpoints",  # Save in current working directory
 )
 
 df = pd.DataFrame(build_dataset())
 train_dataset = Dataset.from_pandas(df)
 
-trainer = DoctorWithGpt4oTrainer(
-    model=doctor_model,
-    processing_class=doctor_tokenizer,
-    reward_funcs=[doctor_game_reward_stub],
-    args=training_args,
-    train_dataset=train_dataset,
-)
+# Create the trainer
+# Note: We don't initialize the trainer yet - we'll do this in main
+# after parsing command line arguments to get the conversation directory
+def create_trainer(model, tokenizer, conversation_dir="./conversations"):
+    trainer = DoctorWithGpt4oTrainer(
+        model=model,
+        processing_class=tokenizer,
+        reward_funcs=[doctor_game_reward_stub],
+        args=training_args,
+        train_dataset=train_dataset,
+        conversation_dir=conversation_dir
+    )
+    return trainer
 
 ########################################
 # 7. Train
@@ -527,7 +545,10 @@ if __name__ == "__main__":
     parser.add_argument("--max_steps", type=int, default=40, help="Maximum number of training steps")
     parser.add_argument("--learning_rate", type=float, default=5e-6, help="Learning rate")
     parser.add_argument("--temperature", type=float, default=0.7, help="Temperature for generation")
-    parser.add_argument("--output_dir", type=str, default=save_path, help="Output directory for saved models")
+    parser.add_argument("--output_dir", type=str, default="./doctor_outputs", 
+                        help="Output directory for saved models (defaults to ./doctor_outputs)")
+    parser.add_argument("--conversation_dir", type=str, default="./conversations",
+                        help="Directory to save conversations (defaults to ./conversations)")
     parser.add_argument("--debug_file_saving", action="store_true", 
                       help="Run debug mode to verify conversation saving works")
     args = parser.parse_args()
@@ -552,9 +573,17 @@ if __name__ == "__main__":
     training_args.learning_rate = args.learning_rate
     training_args.temperature = args.temperature
     training_args.max_steps = args.max_steps
-    if args.output_dir != save_path:
-        save_path = args.output_dir
-        training_args.output_dir = f"{save_path}/outputs"
+    
+    # Always use the specified output directory (default = ./doctor_outputs)
+    save_path = args.output_dir
+    os.makedirs(save_path, exist_ok=True)
+    training_args.output_dir = os.path.join(save_path, "checkpoints")
+    os.makedirs(training_args.output_dir, exist_ok=True)
+    
+    # Set up the conversation directory (default = ./conversations)
+    conversation_dir = args.conversation_dir
+    os.makedirs(conversation_dir, exist_ok=True)
+    print(f"Conversations will be saved to: {os.path.abspath(conversation_dir)}")
     
     # Log training configuration
     logger.info(f"Training configuration:")
@@ -563,11 +592,20 @@ if __name__ == "__main__":
     logger.info(f"  Temperature: {training_args.temperature}")
     logger.info(f"  Max steps: {training_args.max_steps}")
     logger.info(f"  Output directory: {save_path}")
+    logger.info(f"  Conversation directory: {conversation_dir}")
+    
+    # Create the trainer with the specified conversation directory
+    print(f"Creating trainer with conversation_dir={conversation_dir}")
+    trainer = create_trainer(doctor_model, doctor_tokenizer, conversation_dir)
+    
+    # Setup global variable for conversation directory
+    globals()["CONVERSATION_DIR"] = conversation_dir
     
     logger.info("Starting training with GPT-4o API as Patient + Judge ...")
     start_time = datetime.datetime.now()
     
     try:
+        print(f"\n{'='*80}\nTraining model - conversations will be saved to: {os.path.abspath(conversation_dir)}\n{'='*80}\n")
         trainer.train()
         
         # Log training statistics
@@ -579,18 +617,21 @@ if __name__ == "__main__":
         logger.info(f"Training stats: {training_stats}")
         
         # Save final LoRA & checkpoint
-        lora_path = f"{save_path}/doctor_grpo_saved_lora"
+        lora_path = os.path.join(save_path, "doctor_lora")
         doctor_model.save_lora(lora_path)
         logger.info(f"Saved LoRA to {lora_path}")
+        print(f"💾 Saved LoRA to: {os.path.abspath(lora_path)}")
         
-        cp_path = f"{save_path}/doctor_checkpoint"
+        cp_path = os.path.join(save_path, "doctor_checkpoint")
         trainer.save_model(cp_path)
-        trainer.state.save_to_json(f"{cp_path}/trainer_state.json")
+        trainer.state.save_to_json(os.path.join(cp_path, "trainer_state.json"))
         logger.info(f"Saved model checkpoint to {cp_path}")
+        print(f"💾 Saved model checkpoint to: {os.path.abspath(cp_path)}")
         
-        final_lora_path = f"{save_path}/doctor_final_lora"
+        final_lora_path = os.path.join(save_path, "doctor_lora_final")
         doctor_model.save_lora(final_lora_path)
         logger.info(f"Saved final LoRA to {final_lora_path}")
+        print(f"💾 Saved final LoRA to: {os.path.abspath(final_lora_path)}")
         
         # Calculate and log training duration
         end_time = datetime.datetime.now()
