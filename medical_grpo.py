@@ -33,7 +33,16 @@ from unsloth_compiled_cache.UnslothGRPOTrainer import UnslothGRPOTrainer
 # NEW: Import OpenAI
 from openai import OpenAI
 
-client = OpenAI(api_key=config.openai_api_key)
+# Initialize API key as None, will be set later
+openai_api_key = None
+client = None  # Will be initialized when API key is set
+
+def initialize_openai_client(api_key):
+    """Initialize the OpenAI client with the given API key"""
+    global openai_api_key, client
+    openai_api_key = api_key
+    if api_key:
+        client = OpenAI(api_key=api_key)
 
 print("Imports complete.")
 
@@ -109,11 +118,14 @@ class DoctorGame:
     """
 
     def __init__(self, openai_api_key: str = None):
+        global client
         if openai_api_key:
             try:
+                # Initialize client with the provided API key
+                local_client = OpenAI(api_key=openai_api_key)
                 prompt = ("Generate a plausible common medical condition (for example: Influenza, COVID-19, Migraine, etc.) "
                           "and provide only the name of the condition.")
-                response = client.chat.completions.create(model="gpt-4o-mini",
+                response = local_client.chat.completions.create(model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 max_tokens=10)
@@ -174,6 +186,13 @@ class DoctorGRPOTrainer(UnslothGRPOTrainer):
         to simulate a patient who has the hidden condition but does not reveal it.
         """
         try:
+            global client
+            if client is None and hasattr(self.args, 'openai_api_key') and self.args.openai_api_key:
+                client = OpenAI(api_key=self.args.openai_api_key)
+            
+            if client is None:
+                raise ValueError("OpenAI client not initialized. Please provide a valid API key.")
+                
             prompt = (
                 f"You are a patient who has the following condition: {hidden_disease}. "
                 "Answer the doctor's questions by describing your symptoms and feelings in a realistic manner "
@@ -427,6 +446,9 @@ config = GRPOConfig(
     output_dir=f"{save_path}/outputs",
 )
 config.openai_api_key = "YOUR_OPENAI_API_KEY_HERE"  # <-- This flag should be passed via the command.
+
+# Initialize OpenAI client with the API key from config
+initialize_openai_client(config.openai_api_key)
 df = pd.DataFrame(create_doctor_database())
 train_dataset = Dataset.from_pandas(df)
 
