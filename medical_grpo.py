@@ -173,14 +173,14 @@ def call_patient_model(conversation_visible, max_new_tokens=128, temperature=0.7
                 openai_messages.append({"role": "assistant", "content": msg["content"]})
         
         print(f"   - Converted {len(conversation_visible)} messages to {len(openai_messages)} OpenAI format messages")
-        print(f"   - Making API request to 'gpt-3.5-turbo'...")  # Use a known available model
+        print(f"   - Making API request to 'gpt-4o-mini'...")  # Use a known available model
         
         # Try with different client initialization methods
         try:
             # First approach - using newer client (preferred)
             client = OpenAI(api_key=openai.api_key)
             response = client.chat.completions.create(
-                model="gpt-3.5-turbo",  # Use a model we know exists
+                model="gpt-4o-mini",  # Use a model we know exists
                 messages=openai_messages,
                 max_tokens=max_new_tokens,
                 temperature=temperature,
@@ -194,7 +194,7 @@ def call_patient_model(conversation_visible, max_new_tokens=128, temperature=0.7
             # Second approach - using legacy method
             try:
                 response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",  # Use a model we know exists
+                    model="gpt-4o-mini",  # Use a model we know exists
                     messages=openai_messages,
                     max_tokens=max_new_tokens,
                     temperature=temperature,
@@ -237,7 +237,7 @@ Now give me the single float:
 
 def call_judge_model(conversation_with_reason: str, hidden_disease: str, max_new_tokens=64, temperature=0.0):
     """
-    Call GPT-3.5-turbo as Judge via the OpenAI API.
+    Call GPT-4o-mini as Judge via the OpenAI API.
     Parses out the first float in [0..1] from the response.
     """
     print(f"\n🔄 OPENAI API CALL - Judge Role")
@@ -258,14 +258,14 @@ def call_judge_model(conversation_with_reason: str, hidden_disease: str, max_new
     ]
     
     try:
-        print(f"   - Making API request to 'gpt-3.5-turbo' for judging...")
+        print(f"   - Making API request to 'gpt-4o-mini' for judging...")
         
         # Try with different client initialization methods
         try:
             # First approach - using newer client (preferred)
             client = OpenAI(api_key=openai.api_key)
             response = client.chat.completions.create(
-                model="gpt-3.5-turbo",  # Using a known available model
+                model="gpt-4o-mini",  # Using a known available model
                 messages=messages,
                 max_tokens=max_new_tokens,
                 temperature=temperature,
@@ -278,8 +278,7 @@ def call_judge_model(conversation_with_reason: str, hidden_disease: str, max_new
             # Second approach - using legacy method
             try:
                 response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",  # Using a known available model
-                    messages=messages,
+                    model="gpt-4o-mini",# Using a known available model                   messages=messages,
                     max_tokens=max_new_tokens,
                     temperature=temperature,
                 )
@@ -453,7 +452,7 @@ class DoctorGame:
                         openai_messages.append({"role": "assistant", "content": msg["content"]})
                 
                 # Call the patient model with proper OpenAI role formats
-                print(f"Calling GPT-3.5-turbo to generate patient response (with {len(openai_messages)} messages)...")
+                print(f"Calling GPT-4o-mini to generate patient response (with {len(openai_messages)} messages)...")
                 pat_text = call_patient_model(openai_messages, max_new_tokens=128, temperature=0.7)
                 
                 # Add to conversation history using our internal role conventions
@@ -879,7 +878,7 @@ if __name__ == "__main__":
             try:
                 client = OpenAI(api_key=openai.api_key)
                 response = client.chat.completions.create(
-                    model="gpt-3.5-turbo",
+                    model="gpt-4o-mini",
                     messages=[
                         {"role": "system", "content": "You are a helpful assistant."},
                         {"role": "user", "content": "Say hello!"}
