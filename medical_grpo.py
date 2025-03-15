@@ -175,11 +175,12 @@ Conversation:
 {formatted_conversation}
 
 Provide a score from 0.0 to 1.0 based on:
-1. Diagnosis accuracy (50% weight): How correct was the final diagnosis?
+1. Diagnosis accuracy (70% weight): How correct was the final diagnosis?
    -Heavily penalize incorrect diagnoses
-2. Question quality (50% weight): Were the doctor's questions relevant and logical?
+2. Question quality (30% weight): Were the doctor's questions relevant and logical?
    - Poor questions should receive low scores
    - Good, targeted questions should receive high scores
+   - Low quantity of questions should receive low scores if more questions would have been more helpful
 
 YOUR RESPONSE MUST BE ONLY A SINGLE NUMBER BETWEEN 0 AND 1."""
             
