@@ -248,8 +248,32 @@ class DoctorGame:
         while not self.done and self.turn_count < MAX_TURNS:
             self.turn_count += 1
             doc_input = self._build_doctor_prompt(doctor_system_prompt)
-            doc_outs = doctor_model.fast_generate([doc_input], max_new_tokens=256, temperature=0.7)
-            doc_text = doc_outs[0]
+            
+            try:
+                # Try vLLM style with SamplingParams
+                from vllm import SamplingParams
+                sampling_params = SamplingParams(
+                    temperature=0.7,
+                    max_tokens=256,
+                )
+                print(f"Generating doctor response with vLLM (sampling_params)")
+                doc_outs = doctor_model.generate([doc_input], sampling_params=sampling_params)
+                doc_text = doc_outs[0].outputs[0].text
+            except Exception as e:
+                print(f"vLLM generation failed: {str(e)}")
+                try:
+                    # Fall back to basic generation with no parameters
+                    print(f"Falling back to basic generation")
+                    doc_outs = doctor_model.generate([doc_input])
+                    # Check output format and extract text
+                    if hasattr(doc_outs[0], 'outputs') and hasattr(doc_outs[0].outputs[0], 'text'):
+                        doc_text = doc_outs[0].outputs[0].text
+                    else:
+                        doc_text = doc_outs[0]
+                except Exception as e2:
+                    print(f"Basic generation also failed: {str(e2)}")
+                    doc_text = "<reason>Generation failed</reason>\nI'll try to help diagnose your issue. What symptoms are you experiencing?"
+            
             self.step_doctor(doc_text)
 
             if not self.done:
