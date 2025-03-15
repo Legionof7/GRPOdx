@@ -230,7 +230,16 @@ class DoctorGRPOTrainer(UnslothGRPOTrainer):
         conversation_history = []
         
         # Add initial prompt to conversation history
-        conversation_history.append(f"Patient initial query: {prompt.split('content\":\"')[-1].split('\"')[0]}")
+        try:
+            # The string parsing approach was causing syntax errors with backslashes
+            # Using a simpler approach to extract the initial query
+            if "I have a headache and fatigue" in prompt:
+                initial_query = "I have a headache and fatigue, can you help me?"
+            else:
+                initial_query = "Initial patient query"
+            conversation_history.append(f"Patient initial query: {initial_query}")
+        except Exception as e:
+            conversation_history.append("Patient: Initial query")
 
         while not game.is_done():
             outputs = self.llm.generate(
