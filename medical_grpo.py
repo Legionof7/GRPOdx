@@ -272,11 +272,10 @@ class DoctorGame:
             print(f"Generating doctor response for turn {self.turn_count}...")
 
             # Use doc_model.generate with standard arguments (NOT sampling_params)
-            doc_outs = doctor_model.generate(
+            doc_outs = doctor_model.fast_generate(
                 [doc_input],
                 max_new_tokens=256,
                 temperature=0.7,
-                do_sample=True,
             )
 
             # In vLLM mode, doc_outs is a list of RequestOutput objects
