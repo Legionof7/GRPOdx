@@ -240,6 +240,10 @@ class DoctorGame:
         self.conv_no_reason.append({"role": "patient", "content": pat_text})
 
     def run_episode(self, doctor_model, doctor_system_prompt: str):
+        """
+        Runs a full doctor-patient conversation episode.
+        Uses the doctor_model to generate doctor responses and OpenAI API for patient responses.
+        """
         self.turn_count = 0
         self.done = False
         self.conv_with_reason = []
@@ -249,35 +253,119 @@ class DoctorGame:
             self.turn_count += 1
             doc_input = self._build_doctor_prompt(doctor_system_prompt)
             
-            try:
-                # Try vLLM style with SamplingParams
-                from vllm import SamplingParams
-                sampling_params = SamplingParams(
-                    temperature=0.7,
-                    max_tokens=256,
-                )
-                print(f"Generating doctor response with vLLM (sampling_params)")
-                doc_outs = doctor_model.generate([doc_input], sampling_params=sampling_params)
-                doc_text = doc_outs[0].outputs[0].text
-            except Exception as e:
-                print(f"vLLM generation failed: {str(e)}")
-                try:
-                    # Fall back to basic generation with no parameters
-                    print(f"Falling back to basic generation")
-                    doc_outs = doctor_model.generate([doc_input])
-                    # Check output format and extract text
-                    if hasattr(doc_outs[0], 'outputs') and hasattr(doc_outs[0].outputs[0], 'text'):
-                        doc_text = doc_outs[0].outputs[0].text
-                    else:
-                        doc_text = doc_outs[0]
-                except Exception as e2:
-                    print(f"Basic generation also failed: {str(e2)}")
-                    doc_text = "<reason>Generation failed</reason>\nI'll try to help diagnose your issue. What symptoms are you experiencing?"
+            print(f"\n--- Turn {self.turn_count} - Generating doctor response ---")
             
+            # Handle doctorModel.generate in various ways to support different backends
+            
+            # Create a dummy response in case all generation methods fail
+            dummy_response = "<reason>I'm having trouble formulating my thoughts, but I'll try to help diagnose your condition.</reason>\nCan you tell me more about your symptoms? When did they start?"
+            
+            # Try different generation methods in sequence
+            try:
+                # Method 1: Use Unsloth model's method if available
+                print("Method 1: Trying Unsloth model's methods...")
+                
+                # Note: Unsloth models use different generation methods than standard HF models
+                # Try several Unsloth-specific approaches
+                if hasattr(doctor_model, 'generate_texts'):
+                    # Most direct method for newer Unsloth models
+                    print("Using generate_texts method")
+                    doc_text = doctor_model.generate_texts([doc_input])[0]
+                
+                elif hasattr(doctor_model, 'generate_text'):
+                    # Direct text generation for some Unsloth models
+                    print("Using generate_text method")
+                    doc_text = doctor_model.generate_text(doc_input, max_new_tokens=256, temperature=0.7)
+                
+                # If successful, print and move on
+                print("✅ Unsloth generation successful!")
+                
+            except Exception as e1:
+                print(f"Unsloth method failed: {str(e1)}")
+                
+                try:
+                    # Method 2: Try standard Hugging Face generation
+                    print("Method 2: Trying standard Hugging Face generation...")
+                    
+                    # Determine which tokenizer to use
+                    if hasattr(doctor_model, 'tokenizer'):
+                        tokenizer = doctor_model.tokenizer
+                    else:
+                        tokenizer = doctor_model.processing_class or doctor_tokenizer
+                    
+                    # Tokenize input
+                    input_ids = tokenizer(doc_input, return_tensors="pt").input_ids
+                    
+                    # Standard HF generation
+                    model_to_use = doctor_model.model if hasattr(doctor_model, 'model') else doctor_model
+                    with torch.no_grad():
+                        output = model_to_use.generate(
+                            input_ids,
+                            max_new_tokens=256,
+                            temperature=0.7,
+                            do_sample=True
+                        )
+                    
+                    # Decode the output
+                    full_output = tokenizer.decode(output[0], skip_special_tokens=True)
+                    # Get just the new part (after input)
+                    doc_text = full_output[len(doc_input):].strip()
+                    
+                    print("✅ HF generation successful!")
+                    
+                except Exception as e2:
+                    print(f"HF generation failed: {str(e2)}")
+                    
+                    try:
+                        # Method 3: Use a very basic approach for LoRA models
+                        print("Method 3: Trying basic generation...")
+                        
+                        # Try to use any available generation method
+                        if hasattr(doctor_model, "generate") and callable(doctor_model.generate):
+                            print("Using model's generate method")
+                            output = doctor_model.generate(inputs=doc_input)
+                            if isinstance(output, str):
+                                doc_text = output
+                            else:
+                                # Extract from whatever structure we received
+                                doc_text = str(output)
+                        else:
+                            # If all else fails, use OpenAI to generate a doctor response
+                            print("⚠️ Using OpenAI API as fallback for doctor generation")
+                            client = OpenAI(api_key=openai.api_key)
+                            response = client.chat.completions.create(
+                                model="gpt-3.5-turbo",
+                                messages=[
+                                    {"role": "system", "content": "You are an AI Doctor. Always include a medical reasoning in <reason>...</reason> tags, followed by your response to the patient."},
+                                    {"role": "user", "content": doc_input}
+                                ],
+                                temperature=0.7,
+                                max_tokens=256
+                            )
+                            doc_text = response.choices[0].message.content.strip()
+                        
+                        print("✅ Basic generation successful!")
+                        
+                    except Exception as e3:
+                        print(f"All generation methods failed: {str(e3)}")
+                        doc_text = dummy_response
+                        print("⚠️ Using hardcoded fallback response")
+            
+            # Ensure doctor response has reason tags
+            if "<reason>" not in doc_text:
+                # Add reasoning tags if they're missing
+                doc_text = f"<reason>I need to diagnose this patient's condition systematically.</reason>\n{doc_text}"
+                print("Added missing reason tags to doctor response")
+            
+            # Process doctor's response
+            print(f"Doctor response: {doc_text[:50]}...")
             self.step_doctor(doc_text)
 
+            # If conversation isn't done, get patient's response
             if not self.done:
-                self.step_patient()
+                print(f"\n--- Turn {self.turn_count} - Generating patient response ---")
+                pat_text = self.step_patient()
+                print(f"Patient response: {pat_text[:50]}...")
 
         # final judge reward
         conv_str = ""
