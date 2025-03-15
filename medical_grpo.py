@@ -252,33 +252,18 @@ class DoctorGame:
             self.turn_count += 1
             doc_input = self._build_doctor_prompt(doctor_system_prompt)
             
-            # Generate doctor response using fast_generate
-            try:
-                print(f"Generating doctor response for turn {self.turn_count}...")
-                
-                # Default response in case generation fails
-                doc_text = "<reason>I need to assess this patient's condition.</reason>\nCan you tell me about your symptoms?"
-                
-                # Try to use the model's generation method
-                if hasattr(doctor_model, 'fast_generate'):
-                    # This is the method based on the error message
-                    outputs = doctor_model.fast_generate([doc_input])
-                    # Extract text from the output
-                    if isinstance(outputs, list) and outputs:
-                        doc_text = outputs[0]
-                    print("✅ Model generation successful")
-                else:
-                    # Fall back to standard generate method
-                    outputs = doctor_model.generate([doc_input])
-                    if hasattr(outputs[0], 'outputs') and outputs[0].outputs:
-                        doc_text = outputs[0].outputs[0].text
-                    else:
-                        doc_text = str(outputs[0])
-                    print("✅ Model generation successful")
+            # Generate doctor response using the model's generate method
+            # The error occurred because fast_generate expected different parameters
+            print(f"Generating doctor response for turn {self.turn_count}...")
             
-            except Exception as e:
-                print(f"⚠️ Model generation error: {str(e)}")
-                # Keep the default doc_text
+            # Directly use the generate method
+            from vllm import SamplingParams
+            sampling_params = SamplingParams(
+                temperature=0.7,
+                max_tokens=256  # Use max_tokens instead of max_new_tokens
+            )
+            doc_outs = doctor_model.generate([doc_input], sampling_params=sampling_params)
+            doc_text = doc_outs[0].outputs[0].text
             
             # Process the doctor's response
             print(f"Doctor response: {doc_text[:50]}...")
