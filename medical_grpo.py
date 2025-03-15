@@ -97,11 +97,10 @@ COMMON_DISEASES = [
 ]
 
 SYSTEM_PROMPT = """
-You are a Doctor diagnosing a patient. Always provide:
-<reason> your chain-of-thought reasoning here </reason>
-Then provide short visible text for the patient.
+You are a Doctor diagnosing a patient. Use <reason>Thinking</reason> tags to think about what condition/disease the patient may have and questions to ask.
+Then, ask the patient a question to get more information and to rule things out. You can ask up to 4 questions.
 
-When you conclude, provide a final line like:
+When you know what the condition is, provide a final line like:
 Final diagnosis: XYZ
 """
 
@@ -123,11 +122,11 @@ class DoctorGame:
             try:
                 # Initialize client with the provided API key
                 local_client = OpenAI(api_key=openai_api_key)
-                prompt = ("Generate a plausible common medical condition (for example: Influenza, COVID-19, Migraine, etc.) "
+                prompt = ("Generate a plausible medical condition (for example: Influenza, COVID-19, Migraine, etc.) "
                           "and provide only the name of the condition.")
                 response = local_client.chat.completions.create(model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
+                temperature=0.9,
                 max_tokens=10)
                 self.hidden_disease = response.choices[0].message.content.strip()
             except Exception as e:
@@ -224,22 +223,22 @@ class DoctorGRPOTrainer(UnslothGRPOTrainer):
         print(f"Hidden disease: {game.hidden_disease}")
         print("---------------------------------------------------------")
 
-        full_text = prompt
+        # Generate initial symptoms based on the disease
+        initial_symptoms = generate_initial_symptom(game.hidden_disease)
+        print(f"Initial patient symptoms: {initial_symptoms}")
+        
+        # Replace the placeholder with actual symptoms
+        if "[PATIENT_SYMPTOMS]" in prompt:
+            full_text = prompt.replace("[PATIENT_SYMPTOMS]", initial_symptoms)
+        else:
+            full_text = prompt
+            
         total_reward = 0.0
         completion_ids = []
         conversation_history = []
         
-        # Add initial prompt to conversation history
-        try:
-            # The string parsing approach was causing syntax errors with backslashes
-            # Using a simpler approach to extract the initial query
-            if "I have a headache and fatigue" in prompt:
-                initial_query = "I have a headache and fatigue, can you help me?"
-            else:
-                initial_query = "Initial patient query"
-            conversation_history.append(f"Patient initial query: {initial_query}")
-        except Exception as e:
-            conversation_history.append("Patient: Initial query")
+        # Add initial symptoms to conversation history
+        conversation_history.append(f"Patient initial query: {initial_symptoms}")
 
         while not game.is_done():
             outputs = self.llm.generate(
@@ -448,14 +447,57 @@ def doctor_game_reward(prompts, completions, **kwargs) -> list[float]:
     """Stub that always returns 0, the real reward is from multi_turn_generation."""
     return [0.0]*len(prompts)
 
+def generate_initial_symptom(condition):
+    """
+    Generates an initial symptom description for a patient with the given condition.
+    Uses OpenAI API if available, otherwise returns a generic symptom.
+    """
+    global client
+    if client:
+        try:
+            prompt = (
+                f"You are a patient with {condition}. "
+                "Describe your main symptoms in a single sentence, as if you're "
+                "initially talking to a doctor. Don't mention the diagnosis explicitly."
+            )
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=50
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"Error generating initial symptom: {e}")
+            return "I've been feeling unwell recently. Can you help me?"
+    else:
+        # Default symptoms if no OpenAI API is available
+        if "flu" in condition.lower() or "influenza" in condition.lower():
+            return "I have a fever, body aches, and I'm feeling very tired. Can you help?"
+        elif "cold" in condition.lower():
+            return "I have a runny nose, sore throat, and slight cough. What could it be?"
+        elif "strep" in condition.lower():
+            return "My throat is extremely sore and I have a fever. What's wrong with me?"
+        elif "covid" in condition.lower():
+            return "I've lost my sense of taste and smell, and I have a cough. Is this serious?"
+        elif "allerg" in condition.lower():
+            return "My nose is constantly running and my eyes are itchy. What's happening?"
+        elif "migraine" in condition.lower():
+            return "I have this intense, throbbing headache and light is bothering me."
+        else:
+            return "I'm not feeling well and have some concerning symptoms. Can you help me?"
+
 def create_doctor_database():
     """
     Create a single-row dataset with system and user messages in the 'prompt' field.
+    The specific symptom will be generated during training based on the condition.
     """
     row = {
         "prompt": [
             {"role":"system","content":SYSTEM_PROMPT},
-            {"role":"user","content":"I have a headache and fatigue, can you help me?"}
+            # We'll use a placeholder here, the actual patient message
+            # will be generated during training in the multi_turn_generation method
+            {"role":"user","content":"[PATIENT_SYMPTOMS]"}
         ],
         "answer": ""
     }
@@ -469,7 +511,7 @@ def create_doctor_database():
 config = GRPOConfig(
     use_vllm=True,
     learning_rate=5e-6,
-    temperature=0.7,
+    temperature=0.9,
     logging_steps=1,
     max_steps=20,       # just a small demo
     save_steps=10,
