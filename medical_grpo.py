@@ -350,17 +350,46 @@ class DoctorGame:
         Saves the complete conversation to a text file.
         """
         # Create all directories in path if they don't exist
+        print("\n" + "="*80)
+        print("SAVING CONVERSATION LOG")
+        print("="*80)
+        
+        # Get current working directory for reference
+        cwd = os.getcwd()
+        print(f"🔍 Current working directory: {cwd}")
+        
         try:
             # Get the conversation directory from the global variable
             conversation_dir = globals().get("CONVERSATION_DIR", "./conversations")
+            print(f"📁 Using conversation directory: {conversation_dir}")
+            print(f"📁 Absolute path: {os.path.abspath(conversation_dir)}")
+            
+            # List all directories in the current path
+            print(f"📋 Current directory contents: {os.listdir('.')}")
             
             # Make sure directory exists (create if it doesn't)
             if not os.path.exists(conversation_dir):
+                print(f"🔨 Creating missing directory: {conversation_dir}")
                 os.makedirs(conversation_dir, exist_ok=True)
-                print(f"Created directory: {os.path.abspath(conversation_dir)}")
+                print(f"✅ Created directory: {os.path.abspath(conversation_dir)}")
+            else:
+                print(f"✅ Directory already exists: {os.path.abspath(conversation_dir)}")
+                try:
+                    dir_contents = os.listdir(conversation_dir)
+                    print(f"📋 Directory contents: {dir_contents}")
+                except Exception as e:
+                    print(f"⚠️ Could not list directory contents: {str(e)}")
             
             # Create a filename with timestamp, ID and reward score
-            filename = os.path.join(conversation_dir, f"{self.conversation_id}_reward_{reward:.4f}.txt")
+            base_filename = f"{self.conversation_id}_reward_{reward:.4f}.txt"
+            filename = os.path.join(conversation_dir, base_filename)
+            print(f"📝 Will save to file: {filename}")
+            print(f"📝 Absolute path: {os.path.abspath(filename)}")
+            
+            # Try to write directly to the directory first
+            print(f"✏️ Writing conversation data...")
+            content_size = sum(len(entry) for entry in conversation_log)
+            print(f"ℹ️ Conversation size: ~{content_size} characters")
             
             # Write all conversation entries to the file
             with open(filename, "w", encoding="utf-8") as f:
@@ -369,17 +398,31 @@ class DoctorGame:
                 f.write(f"TOTAL TURNS: {self.turn_count}\n\n")
                 
                 # Write each conversation entry
-                for entry in conversation_log:
+                for i, entry in enumerate(conversation_log):
                     f.write(f"{entry}\n")
+                    # Print progress for larger files
+                    if i % 10 == 0 and i > 0:
+                        print(f"   - Wrote {i}/{len(conversation_log)} entries...")
             
             # Get the absolute path for clearer reporting
             abs_path = os.path.abspath(filename)
+            print(f"✅ File write operation completed: {abs_path}")
             
             # Verify the file was actually saved
             if os.path.exists(abs_path):
                 file_size = os.path.getsize(abs_path)
+                print(f"✅ File exists check: PASSED")
+                print(f"📊 File size: {file_size} bytes")
                 logger.info(f"Successfully saved conversation to {abs_path} ({file_size} bytes)")
-                print(f"💾 SAVED CONVERSATION: {abs_path} ({file_size} bytes)")
+                print(f"\n💾 SAVED CONVERSATION: {abs_path} ({file_size} bytes)")
+                
+                # Try to read back the first few bytes to confirm
+                try:
+                    with open(abs_path, 'r', encoding='utf-8') as f:
+                        first_line = f.readline().strip()
+                    print(f"🔍 First line verification: {first_line}")
+                except Exception as e:
+                    print(f"⚠️ Could not read back file: {str(e)}")
                 
                 # Create a flag file to indicate saving was successful
                 flag_file = f"{abs_path}.flag"
@@ -387,26 +430,52 @@ class DoctorGame:
                     f.write(f"Conversation saved at {datetime.datetime.now()}\n")
                     f.write(f"Original file: {abs_path}\n")
                     f.write(f"File size: {file_size} bytes\n")
+                print(f"✅ Flag file created: {flag_file}")
+                
+                # Try saving a copy to the root directory as well for debugging
+                root_copy = f"./{base_filename}"
+                try:
+                    import shutil
+                    shutil.copy2(abs_path, root_copy)
+                    print(f"✅ Also saved copy to: {os.path.abspath(root_copy)}")
+                except Exception as e:
+                    print(f"⚠️ Could not save root copy: {str(e)}")
+                
             else:
                 logger.error(f"File save reported success but file does not exist at {abs_path}")
                 print(f"❌ ERROR: Save appeared to succeed but file not found at {abs_path}")
+                print(f"🔍 Let's check the directory again...")
+                try:
+                    if os.path.exists(conversation_dir):
+                        dir_contents = os.listdir(conversation_dir)
+                        print(f"📋 Directory contents after save: {dir_contents}")
+                    else:
+                        print(f"❌ Directory no longer exists!")
+                except Exception as e:
+                    print(f"❌ Error listing directory: {str(e)}")
             
         except Exception as e:
             error_msg = f"Error saving conversation: {str(e)}"
             logger.error(error_msg)
             print(f"❌ ERROR: {error_msg}")
             
-            # Try a fallback location
+            # Try a fallback location in the root directory
             try:
+                print(f"🚨 Attempting fallback save to root directory...")
                 fallback_filename = f"./{self.conversation_id}_reward_{reward:.4f}.txt"
                 with open(fallback_filename, "w", encoding="utf-8") as f:
                     f.write("FALLBACK SAVE - Original save failed\n\n")
                     f.write(f"CONVERSATION ID: {self.conversation_id}\n")
+                    f.write(f"ERROR: {str(e)}\n\n")
                     for entry in conversation_log:
                         f.write(f"{entry}\n")
                 print(f"💾 FALLBACK SAVE: {os.path.abspath(fallback_filename)}")
             except Exception as e2:
                 print(f"❌ CRITICAL: Fallback save also failed: {str(e2)}")
+                
+        print("="*80)
+        print(f"SAVE OPERATION COMPLETED FOR: {self.conversation_id}")
+        print("="*80 + "\n")
 
 ########################################
 # 4. Custom Trainer with multi_turn_generation
@@ -441,36 +510,113 @@ class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
         
     def multi_turn_generation(self, prompt, model, tokenizer, generation_config, max_new_tokens=50, game_object=None):
         # Print a very visible start message
-        start_msg = "===== Starting a new Doctor–Patient Episode with GPT-4o API roles ====="
-        logger.info(start_msg)
-        print("\n" + "="*80)
-        print(start_msg)
-        print("="*80)
+        print("\n" + "#"*100)
+        print("#" + " "*98 + "#")
+        print("#" + " "*30 + "STARTING NEW DOCTOR-PATIENT CONVERSATION" + " "*30 + "#")
+        print("#" + " "*98 + "#")
+        print("#"*100 + "\n")
+        
+        logger.info("===== Starting a new Doctor–Patient Episode with GPT-4o API roles =====")
+        
+        # Display file system information for debugging
+        print("📋 FILE SYSTEM INFORMATION:")
+        print(f"   - Current working directory: {os.getcwd()}")
+        try:
+            import subprocess
+            print("   - Disk space:")
+            df_output = subprocess.check_output("df -h .", shell=True).decode("utf-8")
+            print(f"     {df_output.strip()}")
+        except Exception as e:
+            print(f"   - Could not get disk space: {str(e)}")
+            
+        print("\n📋 DIRECTORY CONTENTS:")
+        try:
+            contents = os.listdir(".")
+            if len(contents) > 20:
+                print(f"   - {len(contents)} items (showing first 20): {contents[:20]}...")
+            else:
+                print(f"   - {contents}")
+        except Exception as e:
+            print(f"   - Error listing directory: {str(e)}")
         
         # Get the conversation directory from command line args if available
         conversation_dir = getattr(self.args, "conversation_dir", self.conversation_dir)
+        print(f"\n🗂️ CONVERSATION DIRECTORY: {conversation_dir}")
+        print(f"   - Absolute path: {os.path.abspath(conversation_dir)}")
         
         # Make sure the conversations directory exists
         if not os.path.exists(conversation_dir):
+            print("   - Directory does not exist, creating now...")
             try:
                 os.makedirs(conversation_dir, exist_ok=True)
-                print(f"📁 Created conversation directory: {os.path.abspath(conversation_dir)}")
+                print(f"   ✅ Created conversation directory: {os.path.abspath(conversation_dir)}")
+                
+                # Try to create a test file to verify write permissions
+                test_file = os.path.join(conversation_dir, "test_write.txt")
+                with open(test_file, "w") as f:
+                    f.write(f"Test write at {datetime.datetime.now()}\n")
+                print(f"   ✅ Successfully created test file: {test_file}")
+                
+                # Check if the file was actually created
+                if os.path.exists(test_file):
+                    print(f"   ✅ Test file exists verification: PASSED")
+                else:
+                    print(f"   ❌ Test file exists verification: FAILED")
             except Exception as e:
-                print(f"⚠️ Warning: Could not create conversations directory: {str(e)}")
-                print("Will attempt to save directly in current directory as fallback.")
+                print(f"   ❌ Error creating directory: {str(e)}")
+                print("   ⚠️ Will attempt to save directly in current directory as fallback.")
                 conversation_dir = "."
         else:
-            print(f"📁 Using conversation directory: {os.path.abspath(conversation_dir)}")
+            print(f"   ✅ Directory already exists")
+            # Check if we can write to it
+            try:
+                test_file = os.path.join(conversation_dir, "permission_test.txt")
+                with open(test_file, "w") as f:
+                    f.write(f"Permission test at {datetime.datetime.now()}\n")
+                print(f"   ✅ Write permission test: PASSED")
+                
+                # List contents of the directory
+                contents = os.listdir(conversation_dir)
+                if contents:
+                    print(f"   📋 Directory contents: {contents[:10]}..." if len(contents) > 10 else f"   📋 Directory contents: {contents}")
+                else:
+                    print(f"   📋 Directory is empty")
+            except Exception as e:
+                print(f"   ❌ Write permission test: FAILED - {str(e)}")
+                print("   ⚠️ Will attempt to save directly in current directory as fallback.")
+                conversation_dir = "."
         
         # Set the global variable so other methods can use it
         globals()["CONVERSATION_DIR"] = conversation_dir
+        print(f"\n🔄 Set global CONVERSATION_DIR to: {conversation_dir}")
+        
+        # Create a unique conversation ID
+        unique_id = f"conversation_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(10000, 99999)}"
         
         # Run the episode - this will automatically save the conversation to a file
-        scenario = DoctorGame()
-        print(f"Conversation will be saved with ID: {scenario.conversation_id}")
-        print(f"Saving to: {os.path.abspath(os.path.join(conversation_dir, scenario.conversation_id + '_*.txt'))}")
+        print(f"\n🚀 STARTING CONVERSATION: {unique_id}")
+        print(f"   📝 Will save to: {os.path.abspath(os.path.join(conversation_dir, unique_id + '_reward_X.XX.txt'))}")
+        print("\n" + "-"*80 + "\n")
         
+        scenario = DoctorGame()
+        scenario.conversation_id = unique_id  # Override the ID for more uniqueness
+        
+        # Execute the conversation
         final_score = scenario.run_episode(model, DOCTOR_SYSTEM_PROMPT)
+        print(f"\n✅ CONVERSATION COMPLETED - Final reward: {final_score:.4f}")
+        
+        # Check if file was created
+        expected_file = os.path.join(conversation_dir, f"{unique_id}_reward_{final_score:.4f}.txt")
+        if os.path.exists(expected_file):
+            print(f"✅ VERIFICATION: Conversation file exists at {expected_file}")
+            file_size = os.path.getsize(expected_file)
+            print(f"   - File size: {file_size} bytes")
+        else:
+            print(f"❌ VERIFICATION FAILED: Conversation file not found at {expected_file}")
+            # Check if the file might be in the root directory
+            root_file = f"./{unique_id}_reward_{final_score:.4f}.txt"
+            if os.path.exists(root_file):
+                print(f"🔍 Found file in root directory instead: {root_file}")
         
         # Return dummy token IDs since multi-turn generation isn't tokenized fully here.
         completion_ids = [0, 1, 2]
