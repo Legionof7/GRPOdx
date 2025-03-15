@@ -113,7 +113,7 @@ class DoctorGame:
                 prompt = ("Generate a plausible common medical condition (for example: Influenza, COVID-19, Migraine, etc.) "
                           "and provide only the name of the condition.")
                 response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
+                    model="gpt-4o-mini",
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.7,
                     max_tokens=10
@@ -184,7 +184,7 @@ class DoctorGRPOTrainer(UnslothGRPOTrainer):
                 "Now, provide your next response as a message starting with 'Patient:'"
             )
             response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
+                model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": "You are a patient simulating your condition."},
                     {"role": "user", "content": prompt}
