@@ -4,10 +4,27 @@ import os
 import re
 import sys
 import argparse
+import datetime
+import logging
+import uuid
 from typing import List, Dict, Tuple, Any
 
 from unsloth import FastLanguageModel
 from vllm import SamplingParams
+
+# Set up logging configuration
+os.makedirs("logs", exist_ok=True)
+os.makedirs("logs/chat_conversations", exist_ok=True)
+log_filename = f"logs/doctor_chat_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(log_filename),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Constants from medical_grpo.py
 DOCTOR_SYSTEM_INSTRUCTIONS = """System:
@@ -74,6 +91,10 @@ def interactive_chat_session(model_path: str, temperature: float = 0.7):
     """
     Run an interactive doctor-patient chat session with the specified model.
     """
+    logger.info("\n=== Loading Medical AI Doctor Model ===")
+    logger.info(f"Using model path: {model_path}")
+    logger.info(f"Temperature: {temperature}")
+    
     print("\n=== Loading Medical AI Doctor Model ===")
     print(f"Using model path: {model_path}")
     print(f"Temperature: {temperature}")
@@ -93,10 +114,14 @@ def interactive_chat_session(model_path: str, temperature: float = 0.7):
         # Try loading LoRA weights directly
         from peft import PeftModel
         model = PeftModel.from_pretrained(model, model_path)
+        logger.info(f"Loaded LoRA weights from {model_path}")
         print(f"Loaded LoRA weights from {model_path}")
     except Exception as e:
-        print(f"Error loading LoRA weights: {str(e)}")
+        error_msg = f"Error loading LoRA weights: {str(e)}"
+        logger.error(error_msg)
+        print(error_msg)
         print("Falling back to using fresh model without LoRA weights")
+        logger.info("Falling back to using fresh model without LoRA weights")
         # Apply fresh LoRA config as fallback
         model = FastLanguageModel.get_peft_model(
             model,
@@ -105,6 +130,7 @@ def interactive_chat_session(model_path: str, temperature: float = 0.7):
                           "gate_proj", "up_proj", "down_proj"],
         )
     
+    logger.info("Model loaded successfully!")
     print("\n=== Model loaded successfully! ===")
     print("\nAI Doctor Chat Session")
     print("Type 'exit' to end the conversation")
@@ -114,22 +140,37 @@ def interactive_chat_session(model_path: str, temperature: float = 0.7):
     
     show_reasoning = False
     conversation_history = []
+    conversation_id = f"chat_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    logger.info(f"Starting new chat session with ID: {conversation_id}")
     
     while True:
         user_input = input("\nPatient: ").strip()
         
         # Handle special commands
         if user_input.lower() == 'exit':
+            logger.info(f"Chat session {conversation_id} ended by user")
             print("\nEnding session. Goodbye!")
+            # Save conversation history to file before exiting
+            save_conversation_to_file(conversation_history, conversation_id)
             break
         elif user_input.lower() == 'debug':
             show_reasoning = not show_reasoning
             print(f"\nDebug mode {'enabled' if show_reasoning else 'disabled'}")
             continue
         elif user_input.lower() == 'clear':
+            # Save previous conversation if it's not empty
+            if conversation_history:
+                save_conversation_to_file(conversation_history, conversation_id)
+            
+            # Create a new conversation ID
             conversation_history = []
+            conversation_id = f"chat_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+            logger.info(f"Starting new chat session with ID: {conversation_id}")
             print("\nConversation history cleared. Starting new conversation.")
             continue
+        
+        # Log user input
+        logger.debug(f"Patient ({conversation_id}): {user_input}")
         
         # Add user input to conversation history
         conversation_history.append({"role": "user", "content": user_input})
@@ -138,6 +179,14 @@ def interactive_chat_session(model_path: str, temperature: float = 0.7):
         full_response, visible_response = generate_doctor_turn(
             model, tokenizer, conversation_history, temperature
         )
+        
+        # Log doctor's response
+        logger.debug(f"Doctor ({conversation_id}): {visible_response}")
+        if "<reason>" in full_response:
+            reasoning_match = re.search(r"<reason>(.*?)</reason>", full_response, re.DOTALL)
+            if reasoning_match:
+                reasoning = reasoning_match.group(1).strip()
+                logger.debug(f"Doctor reasoning ({conversation_id}): {reasoning}")
         
         # Add doctor's response to conversation history (with reasoning)
         conversation_history.append({"role": "assistant", "content": full_response})
@@ -151,6 +200,26 @@ def interactive_chat_session(model_path: str, temperature: float = 0.7):
             if reasoning_match:
                 reasoning = reasoning_match.group(1).strip()
                 print(f"\n[REASONING]: {reasoning}")
+
+def save_conversation_to_file(conversation_history, conversation_id):
+    """
+    Save the complete conversation to a file.
+    """
+    if not conversation_history:
+        return
+        
+    filename = f"logs/chat_conversations/{conversation_id}.txt"
+    logger.info(f"Saving conversation {conversation_id} to {filename}")
+    
+    with open(filename, "w") as f:
+        f.write(f"Chat ID: {conversation_id}\n")
+        f.write(f"Timestamp: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        f.write("=== CONVERSATION HISTORY ===\n\n")
+        
+        for message in conversation_history:
+            role = "PATIENT" if message["role"] == "user" else "DOCTOR"
+            content = message["content"]
+            f.write(f"{role}:\n{content}\n\n")
 
 def main():
     parser = argparse.ArgumentParser(description="Medical AI Doctor Chat Interface")
@@ -166,9 +235,29 @@ def main():
         default=0.7,
         help="Temperature for generation (default: 0.7)"
     )
+    parser.add_argument(
+        "--log_level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set the logging level (default: INFO)"
+    )
     args = parser.parse_args()
     
-    interactive_chat_session(args.model_path, args.temperature)
+    # Set log level based on command line argument
+    log_level = getattr(logging, args.log_level)
+    logger.setLevel(log_level)
+    for handler in logger.handlers:
+        handler.setLevel(log_level)
+    
+    logger.info(f"Starting doctor_chat.py with log level: {args.log_level}")
+    
+    try:
+        interactive_chat_session(args.model_path, args.temperature)
+    except Exception as e:
+        logger.error(f"Error in chat session: {str(e)}", exc_info=True)
+        print(f"\nAn error occurred: {str(e)}")
+        print("Check the log file for more details.")
 
 if __name__ == "__main__":
     main()

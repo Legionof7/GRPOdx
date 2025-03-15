@@ -22,6 +22,7 @@ import random
 import re
 import os
 import datetime
+import logging
 from contextlib import nullcontext
 
 from transformers import GenerationConfig
@@ -37,7 +38,21 @@ from unsloth_compiled_cache.UnslothGRPOTrainer import UnslothGRPOTrainer
 import openai
 openai.api_key = os.environ["OPENAI_API_KEY"]
 
-print("Imports complete.")
+# Set up logging configuration
+os.makedirs("logs", exist_ok=True)
+log_filename = f"logs/training_run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(log_filename),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+logger.info("Starting medical GRPO training session")
+logger.info("Imports complete.")
 
 ########################################
 # 1. Load Doctor Model + LoRA
@@ -52,7 +67,7 @@ lora_rank = 16
 
 doctor_model_name = "Qwen/Qwen2.5-1.5B-Instruct"  # example base policy
 
-print("Loading the Doctor (policy) model ...")
+logger.info(f"Loading the Doctor (policy) model: {doctor_model_name}")
 doctor_model, doctor_tokenizer = FastLanguageModel.from_pretrained(
     model_name=doctor_model_name,
     max_seq_length=max_seq_length,
@@ -73,9 +88,10 @@ doctor_model = FastLanguageModel.get_peft_model(
     use_gradient_checkpointing="unsloth",
     random_state=42,
 )
+logger.info(f"Doctor model loaded with LoRA rank {lora_rank}")
 
 # Instead of loading GPT-4o-mini locally, we will call it via the OpenAI API.
-print("Using OpenAI API for GPT-4o-mini as Patient & Judge roles ...")
+logger.info("Using OpenAI API for GPT-4o-mini as Patient & Judge roles ...")
 
 ########################################
 # 2. OpenAI API Wrappers for GPT-4o-Mini Patient & Judge Functions
@@ -186,8 +202,10 @@ class DoctorGame:
         self.conv_no_reason = []
         self.turn_count = 0
         self.done = False
+        self.conversation_id = f"conversation_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000, 9999)}"
         # System prompt for the patient (the Doctor does not see this)
         self.patient_system = patient_system_prompt(self.hidden_disease)
+        logger.info(f"New conversation {self.conversation_id} started with hidden disease: {self.hidden_disease}")
 
     def remove_reason_tags(self, text: str) -> str:
         return re.sub(r"<reason>.*?</reason>", "", text, flags=re.DOTALL)
@@ -204,8 +222,14 @@ class DoctorGame:
         self.conv_with_reason.append({"role": "doctor", "content": doc_text})
         visible = self.remove_reason_tags(doc_text)
         self.conv_no_reason.append({"role": "doctor", "content": visible})
+        
+        logger.debug(f"Conversation {self.conversation_id}, Turn {self.turn_count}, Doctor: {visible}")
+        
+        final_diagnosis = None
         if "Final diagnosis:" in visible:
             self.done = True
+            final_diagnosis = self.parse_final_diagnosis(visible)
+            logger.info(f"Conversation {self.conversation_id}: Doctor gave final diagnosis: {final_diagnosis}")
 
     def step_patient(self):
         """
@@ -218,6 +242,7 @@ class DoctorGame:
         pat_text = call_patient_model(messages, max_new_tokens=128, temperature=0.7)
         self.conv_with_reason.append({"role": "patient", "content": pat_text})
         self.conv_no_reason.append({"role": "patient", "content": pat_text})
+        logger.debug(f"Conversation {self.conversation_id}, Turn {self.turn_count}, Patient: {pat_text}")
 
     def run_episode(self, doctor_model, doctor_system_prompt: str):
         """
@@ -228,13 +253,20 @@ class DoctorGame:
         self.turn_count = 0
         while not self.done and self.turn_count < MAX_TURNS:
             self.turn_count += 1
+            logger.info(f"Conversation {self.conversation_id}: Starting turn {self.turn_count}/{MAX_TURNS}")
             doc_input = self._build_doctor_prompt(doctor_system_prompt)
             doc_outs = doctor_model.fast_generate([doc_input], max_new_tokens=256, temperature=0.7)
             doc_text = doc_outs[0]
             self.step_doctor(doc_text)
             if not self.done:
                 self.step_patient()
-        return self.final_judge_reward()
+        
+        reward = self.final_judge_reward()
+        
+        # Log the complete conversation to a separate file
+        self._log_conversation_to_file(reward)
+        
+        return reward
 
     def _build_doctor_prompt(self, doctor_system_prompt: str) -> str:
         """
@@ -254,7 +286,27 @@ class DoctorGame:
         conv_str = ""
         for turn in self.conv_with_reason:
             conv_str += f"{turn['role'].title()}: {turn['content']}\n"
-        return call_judge_model(conv_str, self.hidden_disease)
+        reward = call_judge_model(conv_str, self.hidden_disease)
+        logger.info(f"Conversation {self.conversation_id}: Judge gave reward score: {reward:.4f}")
+        return reward
+        
+    def _log_conversation_to_file(self, reward: float):
+        """
+        Logs the complete conversation to a separate file for review.
+        """
+        os.makedirs("logs/conversations", exist_ok=True)
+        filename = f"logs/conversations/{self.conversation_id}_reward_{reward:.4f}.txt"
+        
+        with open(filename, "w") as f:
+            f.write(f"Hidden disease: {self.hidden_disease}\n")
+            f.write(f"Total turns: {self.turn_count}\n")
+            f.write(f"Final reward: {reward:.4f}\n\n")
+            f.write("=== FULL CONVERSATION (with reasoning) ===\n\n")
+            
+            for turn in self.conv_with_reason:
+                f.write(f"{turn['role'].upper()}:\n{turn['content']}\n\n")
+                
+        logger.info(f"Saved complete conversation to {filename}")
 
 ########################################
 # 4. Custom Trainer with multi_turn_generation
@@ -281,7 +333,7 @@ class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
     """
 
     def multi_turn_generation(self, prompt, model, tokenizer, generation_config, max_new_tokens=50, game_object=None):
-        print("===== Starting a new Doctor–Patient Episode with GPT-4o API roles =====")
+        logger.info("===== Starting a new Doctor–Patient Episode with GPT-4o API roles =====")
         scenario = DoctorGame()
         final_score = scenario.run_episode(model, DOCTOR_SYSTEM_PROMPT)
         # Return dummy token IDs since multi-turn generation isn't tokenized fully here.
@@ -343,14 +395,74 @@ trainer = DoctorWithGpt4oTrainer(
 ########################################
 
 if __name__ == "__main__":
-    print("Starting training with GPT-4o API as Patient + Judge ...")
-    trainer.train()
-
-    # Save final LoRA & checkpoint
-    doctor_model.save_lora(f"{save_path}/doctor_grpo_saved_lora")
-    cp_path = f"{save_path}/doctor_checkpoint"
-    trainer.save_model(cp_path)
-    trainer.state.save_to_json(f"{cp_path}/trainer_state.json")
-    doctor_model.save_lora(f"{save_path}/doctor_final_lora")
-
-    print("Training complete!")
+    import argparse
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Train a doctor model using GRPO")
+    parser.add_argument("--openai_api_key", type=str, help="OpenAI API key")
+    parser.add_argument("--max_steps", type=int, default=40, help="Maximum number of training steps")
+    parser.add_argument("--learning_rate", type=float, default=5e-6, help="Learning rate")
+    parser.add_argument("--temperature", type=float, default=0.7, help="Temperature for generation")
+    parser.add_argument("--output_dir", type=str, default=save_path, help="Output directory for saved models")
+    args = parser.parse_args()
+    
+    # Set OpenAI API key if provided
+    if args.openai_api_key:
+        openai.api_key = args.openai_api_key
+        logger.info("Using provided OpenAI API key")
+    elif not openai.api_key:
+        logger.error("No OpenAI API key found. Please set OPENAI_API_KEY environment variable or provide --openai_api_key")
+        exit(1)
+    
+    # Update training args with command line arguments
+    training_args.learning_rate = args.learning_rate
+    training_args.temperature = args.temperature
+    training_args.max_steps = args.max_steps
+    if args.output_dir != save_path:
+        save_path = args.output_dir
+        training_args.output_dir = f"{save_path}/outputs"
+    
+    # Log training configuration
+    logger.info(f"Training configuration:")
+    logger.info(f"  Model: {doctor_model_name}")
+    logger.info(f"  Learning rate: {training_args.learning_rate}")
+    logger.info(f"  Temperature: {training_args.temperature}")
+    logger.info(f"  Max steps: {training_args.max_steps}")
+    logger.info(f"  Output directory: {save_path}")
+    
+    logger.info("Starting training with GPT-4o API as Patient + Judge ...")
+    start_time = datetime.datetime.now()
+    
+    try:
+        trainer.train()
+        
+        # Log training statistics
+        training_stats = {
+            "total_steps": trainer.state.global_step,
+            "learning_rate": training_args.learning_rate,
+            "temperature": training_args.temperature,
+        }
+        logger.info(f"Training stats: {training_stats}")
+        
+        # Save final LoRA & checkpoint
+        lora_path = f"{save_path}/doctor_grpo_saved_lora"
+        doctor_model.save_lora(lora_path)
+        logger.info(f"Saved LoRA to {lora_path}")
+        
+        cp_path = f"{save_path}/doctor_checkpoint"
+        trainer.save_model(cp_path)
+        trainer.state.save_to_json(f"{cp_path}/trainer_state.json")
+        logger.info(f"Saved model checkpoint to {cp_path}")
+        
+        final_lora_path = f"{save_path}/doctor_final_lora"
+        doctor_model.save_lora(final_lora_path)
+        logger.info(f"Saved final LoRA to {final_lora_path}")
+        
+        # Calculate and log training duration
+        end_time = datetime.datetime.now()
+        duration = end_time - start_time
+        logger.info(f"Training complete! Duration: {duration}")
+        
+    except Exception as e:
+        logger.error(f"Training failed with error: {str(e)}", exc_info=True)
+        raise
