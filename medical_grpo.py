@@ -351,8 +351,13 @@ class DoctorGame:
         """
         # Create all directories in path if they don't exist
         try:
-            conversation_dir = os.path.join(os.getcwd(), "conversations")
-            os.makedirs(conversation_dir, exist_ok=True)
+            # Force absolute path to current working directory
+            conversation_dir = "./conversations"
+            
+            # Make sure directory exists (create if it doesn't)
+            if not os.path.exists(conversation_dir):
+                os.makedirs(conversation_dir, exist_ok=True)
+                print(f"Created directory: {os.path.abspath(conversation_dir)}")
             
             # Create a filename with timestamp, ID and reward score
             filename = os.path.join(conversation_dir, f"{self.conversation_id}_reward_{reward:.4f}.txt")
@@ -367,12 +372,41 @@ class DoctorGame:
                 for entry in conversation_log:
                     f.write(f"{entry}\n")
             
-            logger.info(f"Successfully saved conversation to {filename}")
-            print(f"Saved conversation to {filename}")  # Also print to console for visibility
+            # Get the absolute path for clearer reporting
+            abs_path = os.path.abspath(filename)
+            
+            # Verify the file was actually saved
+            if os.path.exists(abs_path):
+                file_size = os.path.getsize(abs_path)
+                logger.info(f"Successfully saved conversation to {abs_path} ({file_size} bytes)")
+                print(f"💾 SAVED CONVERSATION: {abs_path} ({file_size} bytes)")
+                
+                # Create a flag file to indicate saving was successful
+                flag_file = f"{abs_path}.flag"
+                with open(flag_file, "w") as f:
+                    f.write(f"Conversation saved at {datetime.datetime.now()}\n")
+                    f.write(f"Original file: {abs_path}\n")
+                    f.write(f"File size: {file_size} bytes\n")
+            else:
+                logger.error(f"File save reported success but file does not exist at {abs_path}")
+                print(f"❌ ERROR: Save appeared to succeed but file not found at {abs_path}")
             
         except Exception as e:
-            logger.error(f"Error saving conversation to file: {str(e)}")
-            print(f"Error saving conversation: {str(e)}")  # Print error to console
+            error_msg = f"Error saving conversation: {str(e)}"
+            logger.error(error_msg)
+            print(f"❌ ERROR: {error_msg}")
+            
+            # Try a fallback location
+            try:
+                fallback_filename = f"./{self.conversation_id}_reward_{reward:.4f}.txt"
+                with open(fallback_filename, "w", encoding="utf-8") as f:
+                    f.write("FALLBACK SAVE - Original save failed\n\n")
+                    f.write(f"CONVERSATION ID: {self.conversation_id}\n")
+                    for entry in conversation_log:
+                        f.write(f"{entry}\n")
+                print(f"💾 FALLBACK SAVE: {os.path.abspath(fallback_filename)}")
+            except Exception as e2:
+                print(f"❌ CRITICAL: Fallback save also failed: {str(e2)}")
 
 ########################################
 # 4. Custom Trainer with multi_turn_generation
@@ -401,14 +435,29 @@ class DoctorWithGpt4oTrainer(UnslothGRPOTrainer):
     """
 
     def multi_turn_generation(self, prompt, model, tokenizer, generation_config, max_new_tokens=50, game_object=None):
-        logger.info("===== Starting a new Doctor–Patient Episode with GPT-4o API roles =====")
-        print("===== Starting new Doctor–Patient conversation (will save to 'conversations' folder) =====")
+        # Print a very visible start message
+        start_msg = "===== Starting a new Doctor–Patient Episode with GPT-4o API roles ====="
+        logger.info(start_msg)
+        print("\n" + "="*80)
+        print(start_msg)
+        print("="*80)
         
-        # Create conversations directory if it doesn't exist
-        os.makedirs("conversations", exist_ok=True)
+        # Create conversations directory if it doesn't exist (using relative path)
+        conversation_dir = "./conversations"
+        if not os.path.exists(conversation_dir):
+            try:
+                os.makedirs(conversation_dir, exist_ok=True)
+                print(f"📁 Created conversation directory: {os.path.abspath(conversation_dir)}")
+            except Exception as e:
+                print(f"⚠️ Warning: Could not create conversations directory: {str(e)}")
+                print("Will attempt to save directly in current directory as fallback.")
+        else:
+            print(f"📁 Using existing conversation directory: {os.path.abspath(conversation_dir)}")
         
         # Run the episode - this will automatically save the conversation to a file
         scenario = DoctorGame()
+        print(f"Conversations will be saved with ID: {scenario.conversation_id}")
+        
         final_score = scenario.run_episode(model, DOCTOR_SYSTEM_PROMPT)
         
         # Return dummy token IDs since multi-turn generation isn't tokenized fully here.
@@ -479,7 +528,17 @@ if __name__ == "__main__":
     parser.add_argument("--learning_rate", type=float, default=5e-6, help="Learning rate")
     parser.add_argument("--temperature", type=float, default=0.7, help="Temperature for generation")
     parser.add_argument("--output_dir", type=str, default=save_path, help="Output directory for saved models")
+    parser.add_argument("--debug_file_saving", action="store_true", 
+                      help="Run debug mode to verify conversation saving works")
     args = parser.parse_args()
+    
+    # If debug mode is enabled, test file saving and exit
+    if args.debug_file_saving:
+        print("Running in debug mode to test file saving...")
+        test_dir, conv_dir = debug_conversation_saving()
+        print(f"\nDebug completed. Please check these directories exist:\n- {test_dir}\n- {conv_dir}")
+        print("You should see test files in both directories.")
+        sys.exit(0)
     
     # Set OpenAI API key if provided
     if args.openai_api_key:
@@ -541,3 +600,35 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Training failed with error: {str(e)}", exc_info=True)
         raise
+
+# Quick debugger function to test conversation saving
+def debug_conversation_saving():
+    """
+    This function can be used to test that conversation saving works,
+    without running the full training process.
+    """
+    print("\n=== DEBUGGING CONVERSATION SAVING ===")
+    
+    # Create a test conversation directory
+    test_dir = "./test_conversations"
+    os.makedirs(test_dir, exist_ok=True)
+    
+    # Create a test file
+    test_file = os.path.join(test_dir, "test_conversation.txt")
+    with open(test_file, "w") as f:
+        f.write(f"Test file created at {datetime.datetime.now()}\n")
+        f.write("If you can see this file, conversation saving works!")
+    
+    print(f"Test file created at: {os.path.abspath(test_file)}")
+    print("Please check if this file exists to verify file saving works.")
+    
+    # Also try in the main conversations directory
+    test_file2 = "./conversations/test_conversation.txt"
+    os.makedirs("./conversations", exist_ok=True)
+    with open(test_file2, "w") as f:
+        f.write(f"Test file created at {datetime.datetime.now()}\n")
+        f.write("This file should be in the conversations directory.")
+    
+    print(f"Second test file created at: {os.path.abspath(test_file2)}")
+    
+    return os.path.abspath(test_dir), os.path.abspath("./conversations")
