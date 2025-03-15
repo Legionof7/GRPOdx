@@ -146,14 +146,101 @@ class DoctorGame:
             return match.group(1).strip()
         return ""
 
-    def compute_reward(self, final_guess: str) -> float:
+    def compute_reward(self, final_guess: str, conversation_history: list = None) -> float:
         """
-        If final_guess is non-empty => base reward of 0.2.
-        Then partial credit if it matches the hidden disease.
+        Uses GPT-4o-mini to calculate a more sophisticated reward based on:
+        1. Correctness of diagnosis
+        2. Quality of questions asked
+        3. Penalties for incorrect guesses
+        
+        If OpenAI API is unavailable, falls back to the basic reward calculation.
         """
         if not final_guess:
             return 0.0
+            
+        global client
+        if client is None or not conversation_history:
+            # Fallback to basic reward if API unavailable or no conversation history
+            base = 0.2
+            guess_lower = final_guess.lower()
+            disease_lower = self.hidden_disease.lower()
 
+            if guess_lower == disease_lower:
+                return 1.0
+            if guess_lower in disease_lower or disease_lower in guess_lower:
+                return 0.8
+            return base
+            
+        try:
+            # Format conversation for the reward model
+            formatted_conversation = "\n".join([msg for msg in conversation_history])
+            
+            prompt = f"""Evaluate this doctor-patient conversation as a medical expert.
+
+Hidden disease: {self.hidden_disease}
+Doctor's final diagnosis: {final_guess}
+
+Conversation:
+{formatted_conversation}
+
+Score the doctor on a scale of 0.0 to 1.0 based on these criteria:
+1. Diagnosis accuracy (0.0-0.6): Was the final diagnosis correct or close?
+   - 0.6: Perfectly correct diagnosis
+   - 0.3-0.5: Partially correct (e.g., identified correct family of diseases)
+   - 0.1-0.2: Related but incorrect diagnosis
+   - 0.0: Completely unrelated diagnosis
+
+2. Question quality (0.0-0.3): Were the questions relevant, efficient, and appropriate?
+   - Consider whether questions helped rule in/out the correct diagnosis
+   - Consider if questions followed a logical diagnostic approach
+   - Consider if questions were efficient (not redundant)
+
+3. Penalty for incorrect diagnosis (-0.2-0.0): Should be applied if the diagnosis was confidently wrong
+   - -0.1 to -0.2: For confidently asserting an incorrect diagnosis that could lead to harmful treatment
+   - 0.0: No penalty if doctor expressed uncertainty or diagnosis was partially correct
+
+IMPORTANT: First provide a brief explanation of your scoring, then output ONLY a single float between 0.0 and 1.0 on the final line (your total score).
+"""
+            
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a medical evaluator assessing doctor-patient conversations."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=250
+            )
+            
+            # Extract score from the last line of the response
+            explanation_and_score = response.choices[0].message.content.strip()
+            lines = explanation_and_score.split('\n')
+            
+            # Find the last line with a number in it
+            score_line = None
+            for line in reversed(lines):
+                if any(char.isdigit() for char in line):
+                    score_line = line
+                    break
+                    
+            if score_line:
+                # Extract first float from the line
+                import re
+                score_match = re.search(r"(?<!\w)([0-9]*\.?[0-9]+)(?!\w)", score_line)
+                if score_match:
+                    score = float(score_match.group(0))
+                    return max(0.0, min(1.0, score))  # Ensure score is in [0,1]
+            
+            # If we couldn't parse a score, use the basic calculation as fallback
+            print("Failed to parse reward score from GPT-4o-mini, using fallback calculation.")
+            return self._basic_reward_calculation(final_guess)
+            
+        except Exception as e:
+            print(f"Error calculating reward with GPT-4o-mini: {e}")
+            return self._basic_reward_calculation(final_guess)
+            
+    def _basic_reward_calculation(self, final_guess: str) -> float:
+        """Fallback basic reward calculation method."""
         base = 0.2
         guess_lower = final_guess.lower()
         disease_lower = self.hidden_disease.lower()
@@ -260,7 +347,8 @@ class DoctorGRPOTrainer(UnslothGRPOTrainer):
             if diag_match:
                 final_guess = diag_match.group(1).strip()
                 game.done = True
-                diag_reward = game.compute_reward(final_guess)
+                # Pass the conversation history for the reward model to evaluate
+                diag_reward = game.compute_reward(final_guess, conversation_history)
                 total_reward += diag_reward
                 print(f"Doctor final guess: {final_guess} => reward={diag_reward:.3f}")
                 break
@@ -283,6 +371,42 @@ class DoctorGRPOTrainer(UnslothGRPOTrainer):
         for message in conversation_history:
             print(message)
             print("-----------------------------------------")
+        
+        # If we had a final diagnosis and used GPT-4o-mini for reward, show the evaluation
+        diag_match = re.search(r"Final\s*diagnosis:\s*(.*)", conversation_history[-1], re.IGNORECASE)
+        if diag_match and client is not None:
+            final_guess = diag_match.group(1).strip()
+            # Get evaluation explanation without affecting the reward
+            try:
+                formatted_conversation = "\n".join([msg for msg in conversation_history])
+                explanation_prompt = f"""Evaluate this doctor-patient conversation as a medical expert.
+
+Hidden disease: {game.hidden_disease}
+Doctor's final diagnosis: {final_guess}
+
+Conversation:
+{formatted_conversation}
+
+Please provide a brief evaluation of the doctor's performance:
+1. How accurate was the final diagnosis?
+2. How effective were the doctor's questions?
+3. What could have been done better?
+"""
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "You are a medical evaluator assessing doctor-patient conversations."},
+                        {"role": "user", "content": explanation_prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=250
+                )
+                print("========== Reward Evaluation ==========")
+                print(response.choices[0].message.content.strip())
+                print("-----------------------------------------")
+            except Exception as e:
+                print(f"Could not generate evaluation explanation: {e}")
+        
         print(f"Total reward: {total_reward:.3f}")
         print("===========================================\n")
 
