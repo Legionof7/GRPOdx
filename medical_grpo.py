@@ -33,8 +33,7 @@ from unsloth_compiled_cache.UnslothGRPOTrainer import UnslothGRPOTrainer
 # NEW: Import OpenAI
 from openai import OpenAI
 
-client = OpenAI(api_key=openai_api_key,
-api_key=self.args.openai_api_key)
+client = OpenAI(api_key=config.openai_api_key)
 
 print("Imports complete.")
 
